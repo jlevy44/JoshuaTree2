@@ -5,21 +5,9 @@ from itertools import combinations
 import scipy.sparse as sps
 import glob, re
 from random import randint
+from Bio import SeqIO, Phylo, Tree
+from Bio.Phylo.TreeConstruction import DistanceTreeConstructor, _DistanceMatrix
 
-def generate_genome_signatures(input_files, kmer_length, output_file_prefix,multi_fasta,scaled):
-    """Wrapper for sourmash. Generate genome signatures and corresponding distance matrices for scaffolds/fasta files."""
-    subprocess.call('sourmash compute -f --scaled %d %s -o %s.sig -k %d %s'%(scaled,input_files,output_file_prefix,kmer_length,'--singleton' if multi_fasta else ''),shell=True)
-    subprocess.call('sourmash compare %s.sig --csv %s.cmp.csv'%(output_file_prefix,output_file_prefix),shell=True)
-
-class guide_tree: # FIXME can generate guide tree using mafft quickly for each run... wait until output to cactus dir
-    def __init__(self,fasta_folder,bed_folder):
-        self.fasta_folder = fasta_folder +'/'
-        self.bed_folder = bed_folder + '/'
-        self.short_names = [bed.replace('.bed3','').replace('.bed','') for bed in os.listdir(self.bed_folder)]
-        self.fasta_files = glob.glob(self.fasta_folder+'*.fasta')+glob.glob(self.fasta_folder+'*.fa')
-
-    def find_tree(self,scaled):
-        print 'IN DEV'
 
 class SuperAlignment:
     def __init__(self, pairwise_alignments, max_distance, q_genome):
@@ -151,7 +139,6 @@ class Genome:
             """
         self.df = pd.read_table(self.bed_file,header=None,names=['chr','xi','xf','Gene'],dtype=[str,int,int,str])
         self.df.set_index('Gene')
-        self.extract_CDS()
 
     def export_bed(self,filename):
         df = self.df.reset_index().rename(dict(index='Gene'),axis='columns').reindex(columns=['chr','xi','xf','Gene'])
@@ -273,7 +260,8 @@ class CactusRun:
         self.fasta_output_path = fasta_output_path +'/'
         self.cactus_run_directory = cactus_run_directory +'/'
         self.cactus_output = self.cactus_run_directory+'output/'
-        self.cactus_softlink = cactus_softlink
+        self.hal_path = self.cactus_output+'hal/'
+        self.cactus_softlink = os.path.abspath(cactus_softlink)
         if not nickname_file:
             self.nickname_file = self.cactus_run_directory + 'prot_dict'
             self.protIDs = [fasta.split('_')[-2] for fasta in glob.glob(fasta_path+'/*.fa')+glob.glob(fasta_path+'/*.fasta')]
@@ -281,30 +269,53 @@ class CactusRun:
                 f.write('\n'.join(['\t'.join((protID,)*2) for protID in self.protIDs]))
         self.nickname_file = nickname_file
 
-    def write_fastas(self):
+    def write_fastas_seqfile(self):
         with open(self.nickname_file,'r') as f:
             self.nicknames = dict([tuple(line.split()) for line in f.read().splitlines() if line])
         fastas = glob.glob(self.fasta_output_path+'/*.fa')+glob.glob(self.fasta_output_path+'/*.fasta')
+        self.run_files = []
         for fasta in fastas:
-            f = Fasta(fasta)
-            for key in f.keys():
-                f[key].name = f[key].name
-                #fixme write to individual records in folder described by fasta name
-                # fixme write seqid file, generate trees and seqid file with names... then can run cactus
-            """with open(original_file) as original, open(corrected_file, 'w') as corrected:
-    records = SeqIO.parse(original_file, 'fasta')
-    for record in records:
-        print record.id
-        if record.id == 'foo':
-            record.id = 'bar'
-            record.description = 'bar' # <- Add this line
-        print record.id
-        SeqIO.write(record, corrected, 'fasta') INSERT NEW NICKNAME"""
+            self.nickname2file_dict = {}
+            self.fasta_run_dir = self.cactus_output+fasta[fasta.rfind('/')+1:].split('.')[0]+'/'
+            try:
+                os.mkdir(self.fasta_run_dir)
+            except:
+                pass
+            subprocess.call('rm %s/*.fa %s/*.fasta -r'%(self.fasta_run_dir,self.fasta_run_dir),shell=True)
+            with open(fasta) as f1:
+                records = SeqIO.parse(f1,'fasta')
+                for record in records:
+                    protID = record.id.split('.')[0]
+                    nickname = self.nicknames[protID]
+                    record.id = record.id.replace(protID,nickname)
+                    record.description = record.id
+                    SeqIO.write(record, open(self.fasta_run_dir+nickname+'.fa','a'),'fasta')
+                    self.nickname2file_dict[nickname] = os.path.abspath(self.fasta_run_dir+nickname+'.fa')
+            self.generate_trees()
+            self.seqfile = self.fasta_run_dir+'seqfile'
+            with open(self.fasta_run_dir+'output_tree.nh','r') as f1, open(self.seqfile,'w') as f2:
+                f2.write(f1.read()+'\n'+'\n'.join(['%s %s'%(nickname, nickname_file) for nickname, nickname_file in self.nickname2file_dict.items()]))
+            run_file = os.path.abspath(self.seqfile+'.sh')
+            self.run_files.append(run_file)
+            with open(run_file,'w') as f:
+                f.write('#!/bin/bash\nexport _JAVA_OPTIONS="-Xmx155g"\n%s --maxThreads 16 %s %s %s >& %s\nscp %s %s'%(os.path.abspath(self.cactus_output),self.seqfile,self.fasta_run_dir,fasta.replace('.fa','.hal'),self.seqfile+'.sh.stdout',fasta.replace('.fa','.hal'),self.hal_path+fasta.split('/')[-1].replace('.fa','.hal')))
 
-    def generate_trees(self):
+    def run_cactus(self):
+        for run_file in self.run_files:
+            subprocess.call('nohup sh %s &'%(run_file),shell=True)
+    # fixme, make sure to activate progressive cactus environment; sourcec environment in cactus folder, add hal2maf, send maf 2 cns analysis, parallelize and pipeline all scripts, maybe call nextflow from within python for each of the jobs for pipeline submission
+
+    def generate_trees(self,scaled = 10000, kmer_length = 23, multi_fasta = False):
         # fixme use mafft to generate new guide trees for each set of input fasta files
-        print 'in dev'
-
+        subprocess.call('sourmash compute -f --scaled %d %s -o %s.sig -k %d %s'%(scaled,self.fasta_run_dir,self.fasta_run_dir+'tree',kmer_length,'--singleton' if multi_fasta else ''),shell=True)
+        subprocess.call('sourmash compare %s.sig --csv %s.cmp.csv'%(self.fasta_run_dir+'tree',self.fasta_run_dir+'tree'),shell=True)
+        df = pd.read_csv('%s.cmp.csv'%self.fasta_run_dir+'tree',index_col = None)
+        samples = [fasta.split('/')[-1].replace('.fa','') for fasta in list(df)]
+        distance_matrix = df.as_matrix()
+        constructor = DistanceTreeConstructor()
+        dm = _DistanceMatrix(names=samples,matrix=[list(distance_matrix[i,0:i+1]) for i in range(len(samples))])
+        tree = constructor.nj(dm)
+        Phylo.write(tree,self.fasta_run_dir+'output_tree.nh','newick')
 
 
 CONTEXT_SETTINGS = dict(help_option_names=['-h','--help'], max_content_width=90)
@@ -336,6 +347,8 @@ def run_synteny_pipeline(query_proteomeID,fasta_path,synteny_path,gff_path, bed_
             pairwise_alignment.generate_synteny_structure(synteny_path)
             pairwise_alignments.append(pairwise_alignment)
     else:
+        for protID in gff_files:
+            genomes[protID].extract_CDS()
         for s_prot_ID in set(genomes.keys()) - {query_proteomeID}:
             pairwise_alignment = PairwiseAlignment(genomes[query_proteomeID],genomes[s_prot_ID],loci_threshold=loci_threshold)
             pairwise_alignment.generate_synteny_structure(synteny_path)
@@ -372,6 +385,8 @@ def circos_dropper(fasta_path, gff_path, synteny_path, bed_path, circos_inputs, 
             pairwise_alignment.generate_synteny_structure(synteny_path)
             pairwise_alignments.append(pairwise_alignment)
     else:
+        for protID in gff_files:
+            genomes[protID].extract_CDS()
         for q_protID, s_prot_ID in combinations(genomes.keys(),r=2):
             pairwise_alignment = PairwiseAlignment(genomes[q_protID],genomes[s_prot_ID],loci_threshold=loci_threshold)
             pairwise_alignment.generate_synteny_structure(synteny_path)
