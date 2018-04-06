@@ -487,8 +487,8 @@ def circos_dropper(fasta_path, gff_path, synteny_path, bed_path, circos_inputs, 
 @click.option('-env', '--cactus_env_softlink', default = './cactus_environment', show_default=True, help='Name of softlinked Progressive Cactus virtual environment file.', type=click.Path(exists=False))
 @click.option('-n', '--n_cpus', default = 16, show_default=True, help='Number of cpus used to convert hal 2 maf files.')
 @click.option('-h2m', '--hal2maf_softlink', default = './hal2maf', show_default=True, help='Name of softlinked Progressive Cactus hal2maf program.', type=click.Path(exists=False))
-@click.option('-h2m', '--hal2maf_softlink', default = './hal2maf', show_default=True, help='Name of softlinked Progressive Cactus hal2maf program.', type=click.Path(exists=False))
-@click.option('-h2m', '--hal2maf_softlink', default = './hal2maf', show_default=True, help='Name of softlinked Progressive Cactus hal2maf program.', type=click.Path(exists=False))
+@click.option('-h2m', '--nickname_file', default = '', show_default=True, help='File containing protID nickname in each line for all protIDs, can omit this file by leaving it blank.', type=click.Path(exists=False))
+@click.option('-fi', '--fasta_path', default = './fasta_path/', show_default=True, help='Fasta path containing all of the input genomes. Genome naming must conform to xxx_[protID]_xxx.[fa/fasta].', type=click.Path(exists=False))
 def run_cactus(fasta_output_path,cactus_run_directory,cactus_softlink, cactus_env_softlink, n_cpus, hal2maf_softlink, nickname_file = '', fasta_path = ''): #fixme get rid of '' and add to command line tool
     """Run multiple sequence alignment via Progressive Cactus on multiple species synteny blocks and export as maf files. Try to run softlink_cactus beforehand, else use official cactus paths instead of softlinks."""
     cactus_run_obj = CactusRun(fasta_output_path,cactus_run_directory,cactus_softlink, cactus_env_softlink, nickname_file, fasta_path)
