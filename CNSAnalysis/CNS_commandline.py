@@ -884,7 +884,7 @@ def maf2vcf(cns_config, reference_species, change_coordinates, out_all_species, 
     change_coordinates = int(change_coordinates)
     out_all_species = int(out_all_species)
     overlaps = int(overlaps)
-    mafFiles = [file for file in os.listdir('.') if file.endswith('.maf') and file.startswith('FastaOut')]
+    mafFiles = [file for file in os.listdir('.') if file.endswith('.maf') and file.startswith('fasta_output')]
     try:
         os.mkdir('vcfs')
     except:
@@ -954,7 +954,7 @@ def maf2vcf2(cns_config, reference_species, reference_fai_file, out_all_species,
     print reference_species_chromosomes
     out_all_species = int(out_all_species)
     merge = int(merge)
-    mafFiles = [file for file in os.listdir('.') if file.endswith('.maf') and file.startswith('FastaOut')]
+    mafFiles = [file for file in os.listdir('.') if file.endswith('.maf') and file.startswith('fasta_output')]
     try:
         os.mkdir('vcfs')
     except:
@@ -1267,7 +1267,7 @@ def selective_pressure_statistics(cns_config,reference_species, min_block_length
         master_species = cns_config.split(',')
     master_species = set([species.split('_')[0] for species in master_species])
     print master_species
-    mafFiles = [file for file in os.listdir('.') if file.startswith('FastaOut') and file.endswith('.maf')]
+    mafFiles = [file for file in os.listdir('.') if file.startswith('fasta_output') and file.endswith('.maf')]
     #FIXME tests
     subprocess.call('rm merged.maf',shell=True)
     for file in mafFiles:

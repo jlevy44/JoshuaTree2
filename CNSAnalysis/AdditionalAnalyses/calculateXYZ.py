@@ -57,7 +57,7 @@ for line in inputSpecies:
 inputList = protId.keys()
 analysisRun = os.getcwd().split('/')[-2] + ' Run: '
 specId = {k:v for v,k in protId.iteritems()}
-fastaFolders = ['../CactusRun/output/'+folder+'/' for folder in os.listdir('../CactusRun/output') if folder.startswith('FastaOut')]
+fastaFolders = ['../CactusRun/output/'+folder+'/' for folder in os.listdir('../CactusRun/output') if folder.startswith('fasta_output')]
 if pickleLoad == 0:
     x = Counter()  # amount of sequence in genome
     y = Counter()  # amount of sequence passed into cactus

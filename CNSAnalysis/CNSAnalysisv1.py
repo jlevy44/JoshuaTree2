@@ -177,7 +177,7 @@ listMAFfiles = []
 listGFFFiles = []
 listGenomeFiles = []
 for file in listALLFiles:
-    if file.endswith('.maf') and file.startswith('FastaOut'):
+    if file.endswith('.maf') and file.startswith('fasta_output'):
         listMAFfiles.append(file.strip('\n'))
     if file.endswith('.gff') or file.endswith('.gff3'):
         listGFFFiles.append(file.strip('\n'))
