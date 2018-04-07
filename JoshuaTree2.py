@@ -8,7 +8,7 @@ from itertools import combinations
 import scipy.sparse as sps
 import glob, re
 from random import randint
-from Bio import SeqIO, Phylo, Tree
+from Bio import SeqIO, Phylo
 from Bio.Phylo.TreeConstruction import DistanceTreeConstructor, _DistanceMatrix
 import multiprocessing as mp
 from time import sleep
@@ -69,9 +69,17 @@ class PairwiseSynteny:
         """Take anchor file or synteny file and searches for starting and ending genes for each syntenic block"""
         if self.synteny_file.endswith('.unout'):
             self.synteny_structure = self.unout2structure(self.q_genome, self.s_genome)
+        elif self.synteny_file.endswith('.anchors'):
+            self.synteny_structure = self.anchor2structure(self.q_genome, self.s_genome)
+        elif self.synteny_file.endswith('.bed'):
+            self.import_synteny_structure()
         else:
             self.run_synteny(self.q_genome,self.s_genome,synteny_path)
             self.synteny_structure = self.anchor2structure(self.q_genome, self.s_genome)
+
+    def import_synteny_structure(self):
+        self.synteny_structure = pd.read_table(self.synteny_file,header=None,names=['q_chr','q_xi','q_xf','s_chr','s_xi','s_xf'])
+        self.synteny_structure = self.synteny_structure.rename(dict(enumerate((self.synteny_structure['q_chr']+'\t'+self.synteny_structure['q_xi']+'\t'+self.synteny_structure['q_xf']).as_matrix().tolist())))
 
     def unout2structure(self,q_genome,s_genome):
         with open(self.synteny_file,'r') as f:
@@ -82,8 +90,8 @@ class PairwiseSynteny:
             anchor = np.array(map(lambda line: line.split('\t')[1].split(','),anchor[1:].tolist()))
             if len(anchor) >= self.loci_threshold and anchor.tolist():
                 q_genes, s_genes = anchor[:,2], anchor[:,5]
-                q_coords, s_coords = q_genome.df[q_genes], s_genome.df[s_genes]
-                synteny_structure.append([q_coords.iloc[0,0],q_coords.loc[['xi','xf']].min(),q_coords.loc[['xi','xf']].max(),s_coords.iloc[0,0],s_coords.loc[['xi','xf']].min(),s_coords.loc[['xi','xf']].max()])
+                q_coords, s_coords = q_genome.df[q_genes,:], s_genome.df[s_genes,:]
+                synteny_structure.append([q_coords.iloc[0,0],q_coords[['xi','xf']].min(),q_coords[['xi','xf']].max(),s_coords.iloc[0,0],s_coords.loc[['xi','xf']].min(),s_coords.loc[['xi','xf']].max()])
         self.synteny_structure = pd.DataFrame(synteny_structure,columns=['q_chr','q_xi','q_xf','s_chr','s_xi','s_xf'],index = np.vectorize(lambda x: '\t'.join(map(str,x[:3])))(synteny_structure))
 
     def run_synteny(self,genome1,genome2, synteny_path):
@@ -100,15 +108,17 @@ class PairwiseSynteny:
     def anchor2structure(self, q_genome, s_genome):
         anchor_file = self.synteny_file
         with open(anchor_file,'r') as f:
-            anchors = f.read().split('###')
+            anchors = f.read().split('###')[1:]
         synteny_structure = []
         for anchor in anchors:
+            #print anchor
             if anchor:
-                genes = np.array([line.split()[:2] for line in anchor.splitlines()])
+                genes = np.array([line.split()[:2] for line in anchor.splitlines() if line])
                 if genes.shape[0] >= self.loci_threshold:
                     q_genes, s_genes = genes[:,0] , genes[:,1]
-                    q_coords, s_coords = q_genome.df[q_genes], s_genome.df[s_genes]
-                    synteny_structure.append([q_coords.iloc[0,0],q_coords.loc[['xi','xf']].min(),q_coords.loc[['xi','xf']].max(),s_coords.iloc[0,0],s_coords.loc[['xi','xf']].min(),s_coords.loc[['xi','xf']].max()])
+                    q_coords, s_coords = q_genome.df.loc[q_genes,:], s_genome.df.loc[s_genes,:]
+                    #print q_coords[['xi','xf']]
+                    synteny_structure.append([q_coords.iloc[0,0],q_coords[['xi','xf']].values.min(),q_coords[['xi','xf']].values.max(),s_coords.iloc[0,0],s_coords[['xi','xf']].values.min(),s_coords[['xi','xf']].values.max()])
         self.synteny_structure = pd.DataFrame(synteny_structure,columns=['q_chr','q_xi','q_xf','s_chr','s_xi','s_xf'])
 
     def synteny_structure_2_bed(self,filename):
@@ -136,8 +146,9 @@ class Genome:
         self.bed_file = os.path.abspath(bed_file)
         self.short_name = self.bed_file.split('/')[-1].replace('.bed3','').replace('.bed','')
         self.protID = protID
-        if gff_file:
+        if gff_file and os.path.exists(self.bed_file) == 0 or (os.path.exists(self.bed_file) and os.stat(self.bed_file).st_size == 0):
             self.gff_file = gff_file
+            #click.echo('python -m jcvi.formats.gff bed --type=mRNA --key=%s %s > %s'%(self.gene_info,self.gff_file,self.bed_file))
             subprocess.call('python -m jcvi.formats.gff bed --type=mRNA --key=%s %s > %s'%(self.gene_info,self.gff_file,self.bed_file),shell=True)
             """
             with open(gff_file,'r') as f:
@@ -153,8 +164,8 @@ class Genome:
 
             self.df = df
             """
-        self.df = pd.read_table(self.bed_file,header=None,names=['chr','xi','xf','Gene'],dtype=[str,int,int,str])
-        self.df.set_index('Gene')
+        self.df = pd.read_table(self.bed_file,header=None,names=['chr','xi','xf','Gene'],dtype={'chr':str,'xi':np.int,'xf':np.int,'Gene':str},usecols=[0,1,2,3])
+        self.df = self.df.set_index('Gene')
 
     def export_bed(self,filename):
         df = self.df.reset_index().rename(dict(index='Gene'),axis='columns').reindex(columns=['chr','xi','xf','Gene'])
@@ -165,17 +176,18 @@ class Genome:
         subprocess.call('python -m jcvi.formats.gff load %s %s --parents=mRNA --children=CDS --id_attribute=%s -o %s'%(self.gff_file,self.fasta_file,self.gene_info,self.CDS_file),shell=True)
 
     def export_karyotype(self, filename, n_chromosomes=25, shorten_chr=False):
-        df = pd.read_table(self.fasta_file+'.fai', header=None,names=['chr','length'],usecols=[0,1],dtype=[str,int])
-        df = df.sort_values('length',ascending=False,axis=0)
+        df = pd.read_table(self.fasta_file+'.fai', header=None,names=['chr','length'],usecols=[0,1],dtype=dict(zip(['chr','length'],[str,np.int])))
+        df = df.sort_values(['length'],ascending=False)
         if n_chromosomes < df.shape[0]:
-            df = df.iloc[:n_chromosomes,:]
+            df = df.iloc[:n_chromosomes,:].reset_index(drop=True)
         out_txt = []
         for i in range(df.shape[0]):
-            chr_name = df.iloc[i,'chr'] if not shorten_chr else df.iloc[i,'chr'][0] + df.iloc[i,'chr'].split('_')[-1]
+            chrom = df.loc[i,'chr']
+            chr_name = chrom if not shorten_chr else chrom[0] + chrom.split('_')[-1]
             if i >= 25:
-                out_txt.append('chr - %s-%s %s 0 %d %d,%d,%d\n'%(self.protID,df.iloc[i,'chr'],chr_name,df.iloc[i,'length'],randint(1,255),randint(1,255),randint(1,255)))
+                out_txt.append('chr - %s-%s %s 0 %d %d,%d,%d\n'%(self.protID,chrom,chr_name,df.loc[i,'length'],randint(1,255),randint(1,255),randint(1,255)))
             else:
-                out_txt.append('chr - %s-%s %s 0 %d chr%d\n'%(self.protID,df.iloc[i,'chr'],chr_name,df.iloc[i,'length'],i+1))
+                out_txt.append('chr - %s-%s %s 0 %d chr%d\n'%(self.protID,chrom,chr_name,df.loc[i,'length'],i+1))
         with open(filename,'w') as f:
             f.writelines(out_txt)
         self.karyotype = os.path.abspath(filename)
@@ -363,6 +375,10 @@ class CactusRun:
 #### SNP CLASS #### fixme vcf or tab file, as well as df, can local pca, local tree, final tree (run iqtree), visualize tree, produce enw vcf files and interact with other snp objects
 # fixme maybe add nextflow class?
 # fixme add test classes
+
+###################
+#### CNS CLASS ####
+
 #######################
 #### RUN CLI GROUP ####
 
@@ -396,10 +412,13 @@ def run_synteny_pipeline(query_protID,fasta_path,synteny_path,gff_path, bed_path
     """Stitch together many pairwise syntenic blocks into multiple species syntenic blocks and output as fasta files for a multiple sequence alignment. If synteny files are not supplied, conduct pairwise synteny between all included strains."""
     fasta_files = {fasta.split('_')[-2] : fasta for fasta in glob.glob(fasta_path+'/*.fa')+glob.glob(fasta_path+'/*.fasta')}
     gff_files = {gff.split('.')[-2] : gff for gff in glob.glob(gff_path+'/*.gff')+glob.glob(gff_path+'/*.gff3') }
+    intersect_keys = set(fasta_files.keys()) & set(gff_files.keys())
+    fasta_files = {protID:fasta for protID,fasta in fasta_files.items() if protID in intersect_keys}
+    gff_files = {protID:gff for protID,gff in gff_files.items() if protID in intersect_keys}
     genomes = {}
     pairwise_syntenies = []
     for protID in gff_files:
-        genomes[protID] = Genome(fasta_path+'/'+fasta_files[protID],bed_path+'/'+protID+'.bed',protID,gff_path+'/'+gff_files[protID],gene_info)
+        genomes[protID] = Genome(fasta_files[protID],bed_path+'/'+protID+'.bed',protID,gff_files[protID],gene_info)
         if circos:
             genomes[protID].export_karyotype(circos_inputs+'/'+protID+'.karyotype.txt')
     synteny_files = glob.glob(synteny_path+'/*.unout')+glob.glob(synteny_path+'/*.anchors')
@@ -442,16 +461,22 @@ def run_synteny_pipeline(query_protID,fasta_path,synteny_path,gff_path, bed_path
 @click.option('-ci', '--circos_inputs', default = './circos_inputs/', show_default=True, help='Path containing all of circos inputs and configuration files.', type=click.Path(exists=False))
 @click.option('-co', '--circos_outputs', default = './circos_outputs/', show_default=True, help='Path containing all of circos output images.', type=click.Path(exists=False))
 @click.option('-l', '--loci_threshold', default= 4, show_default=True, help='Minimum number of genes in a syntenic block in order to include the block.')
-def circos_dropper(fasta_path, gff_path, synteny_path, bed_path, circos_inputs, circos_outputs, loci_threshold):
+@click.option('-info', '--gene_info', default = 'Name', show_default=True, help='Naming convention for gff file\'s gene name field.', type=click.Choice(['Name', 'gene_name']))
+@click.option('-n', '--n_cpus', default = 16, show_default=True, help='Number of cpus used to convert hal 2 maf files.')
+def circos_dropper(fasta_path, gff_path, synteny_path, bed_path, circos_inputs, circos_outputs, loci_threshold,gene_info, n_cpus):
     """Visualize many pairwise synteny results. If synteny files are not supplied, conduct pairwise synteny between all included strains."""
     fasta_files = {fasta.split('_')[-2] : fasta for fasta in glob.glob(fasta_path+'/*.fa')+glob.glob(fasta_path+'/*.fasta')}
     gff_files = {gff.split('.')[-2] : gff for gff in glob.glob(gff_path+'/*.gff')+glob.glob(gff_path+'/*.gff3') }
+    intersect_keys = set(fasta_files.keys()) & set(gff_files.keys())
+    fasta_files = {protID:fasta for protID,fasta in fasta_files.items() if protID in intersect_keys}
+    gff_files = {protID:gff for protID,gff in gff_files.items() if protID in intersect_keys}
     genomes = {}
     pairwise_syntenies = []
+    print gff_files, fasta_files
     for protID in gff_files:
-        genomes[protID] = Genome(fasta_path+'/'+fasta_files[protID],bed_path+'/'+protID+'.bed',protID,gff_path+'/'+gff_files[protID],gene_info)
+        genomes[protID] = Genome(fasta_files[protID],bed_path+'/'+protID+'.bed',protID,gff_files[protID],gene_info)
         genomes[protID].export_karyotype(circos_inputs+'/'+protID+'.karyotype.txt')
-
+    print genomes
     synteny_files = glob.glob(synteny_path+'/*.unout')+glob.glob(synteny_path+'/*.anchors')
     if synteny_files:
         for synteny_file in os.listdir(synteny_path):
@@ -465,11 +490,33 @@ def circos_dropper(fasta_path, gff_path, synteny_path, bed_path, circos_inputs, 
             pairwise_syntenies.append(pairwise_synteny)
     else:
         for protID in gff_files:
-            genomes[protID].extract_CDS()
+            proc = mp.Process(target=lambda: genomes[protID].extract_CDS, args=None)
+            proc.daemon = True
+            proc.start()
+            while len(mp.active_childern()) > n_cpus:
+                sleep(1)
+        while len(mp.active_childern()) > 0:
+            sleep(1)
+
+        pairwise_syntenies = []
+
+        def mycallback(x):
+            pairwise_syntenies.extend(x)
+
+        def p_synteny(protIDs):
+            q_protID, s_prot_ID = protIDs
+            pairwise_synteny = PairwiseSynteny(genomes[q_protID],genomes[s_prot_ID],loci_threshold=loci_threshold)
+            pairwise_synteny.generate_synteny_structure(synteny_path)
+            return pairwise_synteny
+
+        """
         for q_protID, s_prot_ID in combinations(genomes.keys(),r=2):
             pairwise_synteny = PairwiseSynteny(genomes[q_protID],genomes[s_prot_ID],loci_threshold=loci_threshold)
             pairwise_synteny.generate_synteny_structure(synteny_path)
-            pairwise_syntenies.append(pairwise_synteny)
+            pairwise_syntenies.append(pairwise_synteny)"""
+        r = mp.Pool(n_cpus).map_async(p_synteny,combinations(genomes.keys(),r=2),callback=mycallback)
+        r.wait()
+
 
     for pairwise_synteny in pairwise_syntenies:
         pairwise_synteny.synteny_structure_2_link(circos_inputs+'/%s.%s.link.txt'%(pairwise_synteny.q_genome.protID,pairwise_synteny.s_genome.protID))
@@ -505,15 +552,16 @@ def softlink_cactus(cactus_distribution_dir,softlink_cactus_name, softlink_env_n
     """Softlink cactus distribution's cactus bash script, virtual environment, and hal2maf program. Useful if installed Cactus to particular directory and want to save time in referencing that directory when running cactus."""
     subprocess.call('ln -s %s %s'%(os.path.abspath(cactus_distribution_dir+'/bin/runProgressiveCactus.sh'),softlink_cactus_name),shell=True)
     subprocess.call('ln -s %s %s'%(os.path.abspath(cactus_distribution_dir+'/environment'),softlink_env_name),shell=True)
-    subprocess.call('ln -s %s %s'%(os.path.abspath(cactus_distribution_dir+'/submodules/hal/bin/hal2mafMP.py'),softlink_env_name),shell=True)
+    subprocess.call('ln -s %s %s'%(os.path.abspath(cactus_distribution_dir+'/submodules/hal/bin/hal2mafMP.py'),softlink_hal2maf_name),shell=True)
 
 @joshuatree.command()
 @click.option('-i','--install_path', help='Install Path.')
 def install_cactus(install_path):
     """Install the Cactus distribution and hal tools.""" # fixme, make sure hal tools works
     os.chdir(install_path)
-    subprocess.call('git clone git://github.com/glennhickey/progressiveCactus.git\ncd progressiveCactus\ngit pull\ngit submodule update --init\nmake',shell=True)
-
+    conda_env = os.popen('echo $CONDA_PREFIX').read().split('/')[-1]
+    subprocess.call('git config --global --add http.sslVersion tlsv1.2\ngit clone git://github.com/glennhickey/progressiveCactus.git\ncd progressiveCactus\ngit pull\ngit submodule update --init\nmake',shell=True)
+    # source deactivate\n \nsource activate %s\n'%conda_env
 
 # fixme, functions to add, nextflow progressiveCactus executor, move maf to new folder, visualize CS, breakdown into CNS elements, extract vcf, local PCA, local Trees, run iqtree, plottree, visualize tree with ete3, merge/intersect vcf, mafstrander, maffilter, vcf to snp matrix, plotPositions and all associated tools,
 # fixme anything with vcf or SNPs should be one class; convert mafobject to vcf object, vcf2tab inside vcf object
