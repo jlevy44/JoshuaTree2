@@ -68,14 +68,14 @@ class PairwiseSynteny:
     def generate_synteny_structure(self,synteny_path):
         """Take anchor file or synteny file and searches for starting and ending genes for each syntenic block"""
         if self.synteny_file.endswith('.unout'):
-            self.synteny_structure = self.unout2structure(self.q_genome, self.s_genome)
+            self.unout2structure(self.q_genome, self.s_genome)
         elif self.synteny_file.endswith('.anchors'):
-            self.synteny_structure = self.anchor2structure(self.q_genome, self.s_genome)
+            self.anchor2structure(self.q_genome, self.s_genome)
         elif self.synteny_file.endswith('.bed'):
             self.import_synteny_structure()
         else:
             self.run_synteny(self.q_genome,self.s_genome,synteny_path)
-            self.synteny_structure = self.anchor2structure(self.q_genome, self.s_genome)
+            self.anchor2structure(self.q_genome, self.s_genome)
 
     def import_synteny_structure(self):
         self.synteny_structure = pd.read_table(self.synteny_file,header=None,names=['q_chr','q_xi','q_xf','s_chr','s_xi','s_xf'])
@@ -146,6 +146,7 @@ class Genome:
         self.bed_file = os.path.abspath(bed_file)
         self.short_name = self.bed_file.split('/')[-1].replace('.bed3','').replace('.bed','')
         self.protID = protID
+        self.CDS_file = self.bed_file.replace('.bed3','.cds').replace('.bed','.cds')
         if gff_file and os.path.exists(self.bed_file) == 0 or (os.path.exists(self.bed_file) and os.stat(self.bed_file).st_size == 0):
             self.gff_file = gff_file
             #click.echo('python -m jcvi.formats.gff bed --type=mRNA --key=%s %s > %s'%(self.gene_info,self.gff_file,self.bed_file))
@@ -172,7 +173,6 @@ class Genome:
         df.to_csv(filename,sep='\t',index=False,header=None)
 
     def extract_CDS(self):
-        self.CDS_file = self.bed_file.replace('.bed3','.cds').replace('.bed','.cds')
         subprocess.call('python -m jcvi.formats.gff load %s %s --parents=mRNA --children=CDS --id_attribute=%s -o %s'%(self.gff_file,self.fasta_file,self.gene_info,self.CDS_file),shell=True)
 
     def export_karyotype(self, filename, n_chromosomes=25, shorten_chr=False):
@@ -247,13 +247,14 @@ class Circos:
         return filename
 
     def generate_config(self, ticks = 'txticks.conf', ideogram = 'txideogram.conf', links_and_rules = 'linksAndrules.conf', config='circos.conf'):
-        colors = pd.read_table(self.synteny.s_genome.karyotype,header=None,usecols=[2,6]).as_matrix()
+        colors = pd.read_table(self.synteny.s_genome.karyotype,header=None,usecols=[2,6],sep=' ').as_matrix()
         self.links_and_rules = links_and_rules
         self.config = config
+        self.ideogram,self.ticks = ideogram, ticks
         if hasattr(self, 'ticks'):
-            self.write_ticks_config(ticks)
+            self.write_ticks_config(self.ticks)
         if hasattr(self, 'ideogram'):
-            self.write_ideogram_config(ideogram)
+            self.write_ideogram_config(self.ideogram)
         with open(self.config,'w') as f:
             f.write("""# circos.conf
                 karyotype = %s, %s
@@ -262,7 +263,9 @@ class Circos:
                 <<include %s>>
                 <<include %s>>
                 <<include %s>>
-                <image><<include etc/image.conf>></image>
+                <image>
+                <<include etc/image.conf>>
+                </image>
                 <<include etc/colors_fonts_patterns.conf>>
                 <<include etc/housekeeping.conf>>
                 """%(self.synteny.q_genome.karyotype,self.synteny.s_genome.karyotype,self.ideogram,self.ticks,self.links_and_rules))
@@ -279,7 +282,7 @@ class Circos:
                 <rule>
                 condition = var(intrachr)
                 show = no
-                </rule>\n"""%(self.synteny.link) + '\n'.join(['<rule>\ncondition = to(%s)\ncolor = %s\n</rule>'%(chrom,color) for chrom,color in colors.itertuples()]) + '\n</rules>\n</link>\n</links>')
+                </rule>\n"""%(self.synteny.link) + '\n'.join(['<rule>\ncondition = to(%s)\ncolor = %s\n</rule>'%(chrom,color) for chrom,color in map(tuple,colors)]) + '\n</rules>\n</link>\n</links>')
 
     def run_circos(self, output_dir='./', pdf=False):
         subprocess.call('circos -conf %s -outputfile %s-%s -outputdir %s'%(self.config,self.synteny.q_genome.protID,self.synteny.s_genome.protID,output_dir),shell=True)
@@ -421,21 +424,32 @@ def run_synteny_pipeline(query_protID,fasta_path,synteny_path,gff_path, bed_path
         genomes[protID] = Genome(fasta_files[protID],bed_path+'/'+protID+'.bed',protID,gff_files[protID],gene_info)
         if circos:
             genomes[protID].export_karyotype(circos_inputs+'/'+protID+'.karyotype.txt')
-    synteny_files = glob.glob(synteny_path+'/*.unout')+glob.glob(synteny_path+'/*.anchors')
+    synteny_files = glob.glob(synteny_path+'/*.unout')+glob.glob(synteny_path+'/*.lifted.anchors')
+    synteny_protIDs = []
     if synteny_files:
-        for synteny_file in os.listdir(synteny_path):
+        for synteny_file in synteny_files:
             if synteny_file.endswith('.unout'):
                 coords = reduce(lambda x,y: x+y, sorted([[m.start(0),m.end(0)] for m in re.finditer('PAC2_0|PAC4GC',synteny_file)]))[1::2]
                 q_protID, s_prot_ID = map(lambda x: synteny_file[x+1:x+4],coords)
             else:
-                q_protID, s_prot_ID = tuple(synteny_file.split('.')[:2])
+                q_protID, s_prot_ID = tuple(synteny_file[synteny_file.rfind('/')+1:].split('.')[:2])
+            synteny_protIDs.append((q_protID, s_prot_ID))
             pairwise_synteny = PairwiseSynteny(genomes[q_protID],genomes[s_prot_ID],synteny_file,loci_threshold=loci_threshold)
             pairwise_synteny.generate_synteny_structure(synteny_path)
             pairwise_syntenies.append(pairwise_synteny)
+        if len(pairwise_syntenies) < len(intersect_keys)-1:
+            synteny_protIDs = set(np.array(synteny_protIDs)[:,1]).union({query_protID})
+            remaining_protIDs = set(intersect_keys) - synteny_protIDs
+        else:
+            remaining_protIDs = set()
     else:
-        for protID in gff_files:
+        remaining_protIDs = set(intersect_keys) - {query_protID}
+
+
+    if list(remaining_protIDs):
+        for protID in remaining_protIDs.union({query_protID}):
             genomes[protID].extract_CDS()
-        for s_prot_ID in set(genomes.keys()) - {query_protID}:
+        for s_prot_ID in remaining_protIDs:
             pairwise_synteny = PairwiseSynteny(genomes[query_protID],genomes[s_prot_ID],loci_threshold=loci_threshold)
             pairwise_synteny.generate_synteny_structure(synteny_path)
             pairwise_syntenies.append(pairwise_synteny)
@@ -477,14 +491,14 @@ def circos_dropper(fasta_path, gff_path, synteny_path, bed_path, circos_inputs, 
         genomes[protID] = Genome(fasta_files[protID],bed_path+'/'+protID+'.bed',protID,gff_files[protID],gene_info)
         genomes[protID].export_karyotype(circos_inputs+'/'+protID+'.karyotype.txt')
     print genomes
-    synteny_files = glob.glob(synteny_path+'/*.unout')+glob.glob(synteny_path+'/*.anchors')
+    synteny_files = glob.glob(synteny_path+'/*.unout')+glob.glob(synteny_path+'/*.lifted.anchors')
     if synteny_files:
-        for synteny_file in os.listdir(synteny_path):
+        for synteny_file in synteny_files:
             if synteny_file.endswith('.unout'):
                 coords = reduce(lambda x,y: x+y, sorted([[m.start(0),m.end(0)] for m in re.finditer('PAC2_0|PAC4GC',synteny_file)]))[1::2]
                 q_protID, s_prot_ID = map(lambda x: synteny_file[x+1:x+4],coords)
             else:
-                q_protID, s_prot_ID = tuple(synteny_file.split('.')[:2])
+                q_protID, s_prot_ID = tuple(synteny_file[synteny_file.rfind('/')+1:].split('.')[:2])
             pairwise_synteny = PairwiseSynteny(genomes[q_protID],genomes[s_prot_ID],synteny_file,loci_threshold=loci_threshold)
             pairwise_synteny.generate_synteny_structure(synteny_path)
             pairwise_syntenies.append(pairwise_synteny)
@@ -497,7 +511,7 @@ def circos_dropper(fasta_path, gff_path, synteny_path, bed_path, circos_inputs, 
                 sleep(1)
         while len(mp.active_childern()) > 0:
             sleep(1)
-
+        # fixme add remaining prot ID feauture
         pairwise_syntenies = []
 
         def mycallback(x):
