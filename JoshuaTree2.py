@@ -382,7 +382,7 @@ class CactusRun:
 #### MAF CLASS #### fixme try to inheret from circos class, maf class will allow you to extract CNS or VCF, visualize CS and CNS
 
 class MAF_filter_config:
-    def __init__(self, config_file='maf_filter_config.bpp', input_file='merged.maf',,species = 'list_species.txt', reference_species = '', log_file = 'log.out', out_all_species = True):
+    def __init__(self, config_file='maf_filter_config.bpp', input_file='merged.maf',species = 'list_species.txt', reference_species = '', log_file = 'log.out', out_all_species = True):
         self.config_file = config_file
         self.config_txt = ''
         self.input_file = input_file
