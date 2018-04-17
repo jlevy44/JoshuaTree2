@@ -152,7 +152,7 @@ class Genome:
         self.gff_file = gff_file
         if self.gff_file and os.path.exists(self.bed_file) == 0 or (os.path.exists(self.bed_file) and os.stat(self.bed_file).st_size == 0):
             #click.echo('python -m jcvi.formats.gff bed --type=mRNA --key=%s %s > %s'%(self.gene_info,self.gff_file,self.bed_file))
-            subprocess.call('python -m jcvi.formats.gff bed --type=gene --key=%s %s -o %s'%(self.gene_info,self.gff_file,self.bed_file),shell=True)
+            subprocess.call('python -m jcvi.formats.gff bed --type=mRNA --key=%s %s -o %s'%(self.gene_info,self.gff_file,self.bed_file),shell=True)
             """
             with open(gff_file,'r') as f:
                 for header_line,line in enumerate(f):
@@ -382,7 +382,7 @@ class CactusRun:
 #### MAF CLASS #### fixme try to inheret from circos class, maf class will allow you to extract CNS or VCF, visualize CS and CNS
 
 class MAF_filter_config:
-    def __init__(self, config_file, input_file, species = 'list_species.txt', reference_species = '', log_file = 'log.out', out_all_species = True):
+    def __init__(self, config_file='maf_filter_config.bpp', input_file='merged.maf',,species = 'list_species.txt', reference_species = '', log_file = 'log.out', out_all_species = True):
         self.config_file = config_file
         self.config_txt = ''
         self.input_file = input_file
@@ -409,20 +409,24 @@ class MAF_filter_config:
                 remove_duplicates=yes),\\"""%('yes' if keep else 'no', species if species else ','.join(self.all_species)))
 
 
-    def add_vcf_text(self, vcf_file):
+    def add_vcf_text(self, vcf_file='vcfs/merged.vcf'):
         self.endtxt.append("""VcfOutput(\\
-                file=vcfs/merged.vcf,\\
+                file=%s,\\
                 genotypes=(%s),\\
                 all=no,\\
-                reference=%s),\\"""%(','.join(self.species),self.reference_species))
+                reference=%s),\\"""%(vcf_file,','.join(self.species),self.reference_species))
 
     def create_txt(self):
-        self.config_txt += """input.file=./merged.new_coords.maf
-    input.format=Maf
-    output.log=out.log
-    maf.filter=\\\n"""
+        self.config_txt += """input.file=%s
+    input.format=%s
+    output.log=%s
+    maf.filter=\\\n"""%(self.input_file,self.input_format,self.log_file) +'\n'.join(self.endtxt[:-3])
         with open(self.config_file,'w') as f:
-            print """IN DEV"""
+            f.write(self.config_txt)
+
+    def run_maffilter(self):
+        subprocess.call('./maffilter param=%s'%self.config_file,shell=True)
+
 
 class MAF:
     def __init__(self, maf_file, special_format = True):
@@ -486,10 +490,7 @@ class MAF:
                     f.seek(idx)
                     chrom, position, segment = change_segment(f.read(self.idx[idx] - idx),reference_species,reference_species_chromosomes)
                     if chrom:
-                        #maf_sort_structure.append((chrom, position, count))
-                        #count += 1
                         out_segments.append(segment)
-                        #f2.write(segment)
                 f2.write(''.join(out_segments))
         self.maf_file_new_coords = changed_coordinates_file
 
@@ -497,9 +498,9 @@ class MAF:
         subprocess.call('./mafStrander -m %s --seq %s > temp.maf'%(self.maf_file,reference_species),shell=True)
         subprocess.call('mv temp.maf %s'%self.maf_file)
 
-    def maf2vcf(self, species, reference_species, reference_species_fai):
+    def maf2vcf(self, maf_filter_config, species, reference_species, reference_species_fai, vcf_out):
         """Run on a merged maf file first by using merger."""
-        reference_species_chromosomes = dict(zip(os.popen("awk '{print $1}' %s"%reference_species_fai).read().splitlines(),map(int,os.popen("awk '{print $2}' %s"%reference_fai_file).read().splitlines())))
+        reference_species_chromosomes = dict(zip(os.popen("awk '{print $1}' %s"%reference_species_fai).read().splitlines(),map(int,os.popen("awk '{print $2}' %s"%reference_species_fai).read().splitlines())))
         try:
             os.mkdir('vcfs')
         except:
@@ -511,31 +512,15 @@ class MAF:
 
         self.change_coordinates(reference_species,reference_species_chromosomes, self.maf_file.replace('.maf','.new_coords.maf'))
 
-        with open('maf_filter_config.bpp','w') as f:
-            f.write("""
-        input.file=./merged.new_coords.maf
-        input.format=Maf
-        output.log=out.log
-        maf.filter=\\
-            Subset(\\
-                    strict=yes,\\
-                    keep=no,\\
-                    species=(%s),\\
-                    remove_duplicates=yes),\\
-            Subset(\\
-                    strict=yes,\\
-                    keep=yes,\\
-                    species=(%s),\\
-                    remove_duplicates=yes),\\
-            VcfOutput(\\
-                    file=vcfs/merged.vcf,\\
-                    genotypes=(%s),\\
-                    all=no,\\
-                    reference=%s)
-                """%(','.join(all_species),reference_species,','.join(species),reference_species))
-        subprocess.call('./maffilter param=maf_filter_config.bpp',shell=True)
-        concat_vcf('vcfs/merged.vcf','vcfs/final.vcf')
-        generate_new_header('vcfs/final.vcf')
+        self.config = MAF_filter_config(maf_filter_config, self.maf_file_new_coords, species, reference_species)
+        self.config.add_subset_text(keep=False)
+        self.config.add_subset_text(species=reference_species)
+        self.config.add_vcf_text(vcf_out)
+        self.config.run_maffilter()
+
+        vcf_obj = SNP(vcf_out)
+        vcf_obj.concat_vcf(vcf_out)
+        vcf_obj.generate_new_header(vcf_out)
 
 
 
@@ -544,6 +529,65 @@ class MAF:
 #### SNP CLASS #### fixme vcf or tab file, as well as df, can local pca, local tree, final tree (run iqtree), visualize tree, produce enw vcf files and interact with other snp objects
 # fixme maybe add nextflow class?
 # fixme add test classes
+
+class SNP:
+    def __init__(self, snp_file, snp_format = 'vcf'):
+        self.snp_file = snp_file
+        self.format = snp_format
+
+    def concat_vcf(self, vcf_out):
+        if self.format == 'vcf':
+            list_vcfs = self.snp_file.split(',')
+            master_df = pd.DataFrame()
+            header_lines = []
+            print list_vcfs
+            for vcf_in in list_vcfs:
+                with os.popen(('z' if vcf_in.endswith('.gz') else '')+'cat %s'%vcf_in) as f:
+                    line_count = 0
+                    for line in f:
+                        header_lines.append(line)
+                        if line.startswith('#CHROM'):
+                            line_info = line.strip('/n').split() # FIXME can grab header line number here
+                            break
+                        line_count += 1
+                if vcf_in.endswith('.gz'):
+                    master_df = master_df.append(pd.DataFrame(np.hstack([np.array(os.popen(('z' if vcf_in.endswith('.gz') else '')+"cat %s | grep -v ^# | awk '{ print $%d }'"%(vcf_in,i+1)).read().splitlines())[:,None] for i in range(len(line_info))]),columns = line_info))
+                else:
+                    master_df = master_df.append(pd.read_table(vcf_in,header=line_count))
+            header_lines = set(header_lines)
+            master_df['POS'] = np.vectorize(int)(master_df['POS'])
+            master_df = master_df.sort_values(['#CHROM','POS'])
+            master_df.to_csv(vcf_out,sep='\t',index=False, na_rep = '.')
+            with open(vcf_out.replace('.vcf','.headers.vcf'),'w') as f, open(vcf_out,'r') as f2:
+                for line in [line2 for line2 in header_lines if '#CHROM' not in line2]:
+                    f.write(line)
+                f.write(f2.read())
+            subprocess.call('mv %s %s'%(vcf_out.replace('.vcf','.headers.vcf'),vcf_out),shell=True)
+            self.vcf_file = vcf_out
+        else:
+            print('File(s) must be in vcf/vcf.gz format before proceeding.')
+
+    def generate_new_header(self, vcf_out):
+        if self.format == 'vcf':
+            sort_vcf_in = self.vcf_file
+            header_line = '\n'+os.popen("grep '^#CHROM' %s"%sort_vcf_in).read().strip('\n')
+            chrms = set(os.popen("awk '{ print $1}' %s | grep -v ^#"%sort_vcf_in).read().splitlines())
+            new_lines = """##fileformat=VCFv4.1\n"""+'\n'.join(sorted(['##contig=<ID=' + chrm + ',length=' + os.popen('grep %s %s | tail -n 1'%(chrm,sort_vcf_in)).read().strip('/n').split()[1] + '>' for chrm in chrms]))+'\n'+'\n'.join(['##FILTER=<ID=gap,Description="At least one sequence contains a gap">','##FILTER=<ID=unk,Description="At least one sequence contains an unresolved character">','##FILTER=<ID=gunk,Description="At least one sequence contains an unresolved character and gap.">','##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">'])+header_line
+            with open('new_header.txt','w') as f:
+                f.write(new_lines+'\n')
+            subprocess.call("""(cat new_header.txt;
+                                sed 's/gap,unk/gunk/g' %s | grep -v ^#;) \
+                                > %s"""%(sort_vcf_in,sort_vcf_in.replace('.vcf','.new_head.vcf')),shell=True)
+            df = pd.read_table(sort_vcf_in.replace('.vcf','.new_head.vcf'),header=new_lines.count('\n')).fillna('.')
+            df['INFO'] = '.'
+            df['FORMAT'] = 'GT'
+            df.to_csv(sort_vcf_in.replace('.vcf','.new_head.vcf'),sep='\t',index=False, na_rep = '.')
+            subprocess.call("""(cat new_header.txt;
+                                cat %s | grep -v ^#;) \
+                                > %s"""%(sort_vcf_in.replace('.vcf','.new_head.vcf'),vcf_out),shell=True)# sort_vcf_in.replace('.vcf','.new_head_final.vcf')
+            self.vcf_file = vcf_out
+        else:
+            print('File must be in vcf format before proceeding.')
 
 ###################
 #### CNS CLASS ####
