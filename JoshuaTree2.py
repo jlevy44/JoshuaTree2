@@ -10,8 +10,10 @@ import glob, re
 from random import randint
 from Bio import SeqIO, Phylo
 from Bio.Phylo.TreeConstruction import DistanceTreeConstructor, _DistanceMatrix
-import multiprocessing as mp
+#import multiprocessing as mp
 from time import sleep
+from pathos import multiprocessing as mp
+from pathos.pp_map import ppmap
 
 #################
 #### CLASSES ####
@@ -90,9 +92,9 @@ class PairwiseSynteny:
             anchor = np.array(map(lambda line: line.split('\t')[1].split(','),anchor[1:].tolist()))
             if len(anchor) >= self.loci_threshold and anchor.tolist():
                 q_genes, s_genes = anchor[:,2], anchor[:,5]
-                q_coords, s_coords = q_genome.df[q_genes,:], s_genome.df[s_genes,:]
-                synteny_structure.append([q_coords.iloc[0,0],q_coords[['xi','xf']].min(),q_coords[['xi','xf']].max(),s_coords.iloc[0,0],s_coords.loc[['xi','xf']].min(),s_coords.loc[['xi','xf']].max()])
-        self.synteny_structure = pd.DataFrame(synteny_structure,columns=['q_chr','q_xi','q_xf','s_chr','s_xi','s_xf'],index = np.vectorize(lambda x: '\t'.join(map(str,x[:3])))(synteny_structure))
+                q_coords, s_coords = q_genome.df.loc[q_genes,:], s_genome.df.loc[s_genes,:]
+                synteny_structure.append([q_coords.iloc[0,0],q_coords[['xi','xf']].values.min(),q_coords[['xi','xf']].values.max(),s_coords.iloc[0,0],s_coords[['xi','xf']].values.min(),s_coords[['xi','xf']].values.max()])
+        self.synteny_structure = pd.DataFrame(synteny_structure,columns=['q_chr','q_xi','q_xf','s_chr','s_xi','s_xf'])#,index = np.vectorize(lambda x: '\t'.join(map(str,x[:3])))(synteny_structure))
 
     def run_synteny(self,genome1,genome2, synteny_path):
         pwd = os.getcwd()
@@ -147,10 +149,10 @@ class Genome:
         self.short_name = self.bed_file.split('/')[-1].replace('.bed3','').replace('.bed','')
         self.protID = protID
         self.CDS_file = self.bed_file.replace('.bed3','.cds').replace('.bed','.cds')
-        if gff_file and os.path.exists(self.bed_file) == 0 or (os.path.exists(self.bed_file) and os.stat(self.bed_file).st_size == 0):
-            self.gff_file = gff_file
+        self.gff_file = gff_file
+        if self.gff_file and os.path.exists(self.bed_file) == 0 or (os.path.exists(self.bed_file) and os.stat(self.bed_file).st_size == 0):
             #click.echo('python -m jcvi.formats.gff bed --type=mRNA --key=%s %s > %s'%(self.gene_info,self.gff_file,self.bed_file))
-            subprocess.call('python -m jcvi.formats.gff bed --type=mRNA --key=%s %s > %s'%(self.gene_info,self.gff_file,self.bed_file),shell=True)
+            subprocess.call('python -m jcvi.formats.gff bed --type=gene --key=%s %s -o %s'%(self.gene_info,self.gff_file,self.bed_file),shell=True)
             """
             with open(gff_file,'r') as f:
                 for header_line,line in enumerate(f):
@@ -172,8 +174,9 @@ class Genome:
         df = self.df.reset_index().rename(dict(index='Gene'),axis='columns').reindex(columns=['chr','xi','xf','Gene'])
         df.to_csv(filename,sep='\t',index=False,header=None)
 
-    def extract_CDS(self):
-        subprocess.call('python -m jcvi.formats.gff load %s %s --parents=mRNA --children=CDS --id_attribute=%s -o %s'%(self.gff_file,self.fasta_file,self.gene_info,self.CDS_file),shell=True)
+    def extract_CDS(self): # python -m jcvi.formats.gff uniq t.PAC2_0.316.gff3 -o uniq.gff3
+        if os.path.exists(self.CDS_file) == 0 or (os.path.exists(self.CDS_file) and os.stat(self.CDS_file).st_size == 0):
+            subprocess.call('python -m jcvi.formats.gff load %s %s --parents=mRNA --children=CDS --id_attribute=%s -o %s'%(self.gff_file,self.fasta_file,self.gene_info,self.CDS_file),shell=True)
 
     def export_karyotype(self, filename, n_chromosomes=25, shorten_chr=False):
         df = pd.read_table(self.fasta_file+'.fai', header=None,names=['chr','length'],usecols=[0,1],dtype=dict(zip(['chr','length'],[str,np.int])))
@@ -305,7 +308,8 @@ class CactusRun:
             with open(self.nickname_file,'w') as f:
                 f.write('\n'.join(['\t'.join((protID,)*2) for protID in self.protIDs]))
         self.nickname_file = nickname_file
-        subprocess.call('source %s'%cactus_env_softlink,shell=True)
+        self.cactus_env_softlink = cactus_env_softlink
+        #subprocess.call('source %s'%cactus_env_softlink,shell=True)
 
     def write_fastas_seqfile(self):
         with open(self.nickname_file,'r') as f:
@@ -338,9 +342,12 @@ class CactusRun:
             with open(run_file,'w') as f:
                 f.write('#!/bin/bash\nexport _JAVA_OPTIONS="-Xmx155g"\n%s --maxThreads 16 %s %s %s >& %s\nscp %s %s'%(os.path.abspath(self.cactus_output),self.seqfile,self.fasta_run_dir,fasta.replace('.fa','.hal'),self.seqfile+'.sh.stdout',fasta.replace('.fa','.hal'),self.hal_path+fasta.split('/')[-1].replace('.fa','.hal')))
 
-    def run_cactus(self):
-        for run_file in self.run_files:
-            subprocess.call('nohup sh %s &'%(run_file),shell=True)
+    def run_cactus(self, submission = 'local'):
+        with open('nextflow.config','w') as f:
+            f.write('\n'.join(["process.%s = '%s'"%(i,j) for i,j in zip(['executor','memory'],[submission,'155G'])]))
+        subprocess.call("nextflow run run_cactus.nf --work_dir %s --cactus_run_files %s --environment %s"%(os.getcwd(),','.join(os.path.abspath(run_file) for run_file in self.run_files),os.path.abspath(self.cactus_env_softlink)),shell=True)
+        #for run_file in self.run_files:
+        #    subprocess.call('nohup sh %s &'%(run_file),shell=True)
     # fixme, make sure to activate progressive cactus environment; sourcec environment in cactus folder, add hal2maf, send maf 2 cns analysis, parallelize and pipeline all scripts, maybe call nextflow from within python for each of the jobs for pipeline submission
 
     def generate_trees(self,scaled = 10000, kmer_length = 23, multi_fasta = False):
@@ -373,6 +380,165 @@ class CactusRun:
 
 ###################
 #### MAF CLASS #### fixme try to inheret from circos class, maf class will allow you to extract CNS or VCF, visualize CS and CNS
+
+class MAF_filter_config:
+    def __init__(self, config_file, input_file, species = 'list_species.txt', reference_species = '', log_file = 'log.out', out_all_species = True):
+        self.config_file = config_file
+        self.config_txt = ''
+        self.input_file = input_file
+        self.input_format = 'Maf'
+        self.log_file = log_file
+        self.all_species = species.split(',') if not species.endswith('.txt') else open(species,'r').read().splitlines()
+        all_species_but_one = set(self.all_species) - {reference_species}
+        if out_all_species:
+            self.species = self.all_species
+        else:
+            self.species = all_species_but_one
+        self.reference_species = reference_species
+        self.endtxt = []
+
+    def export(self):
+        with open(self.config_file,'w') as f:
+            f.write(self.config_txt)
+
+    def add_subset_text(self, species = '', keep=True):
+        self.endtxt.append("""Subset(\\
+                strict=yes,\\
+                keep=%s,\\
+                species=(%s),\\
+                remove_duplicates=yes),\\"""%('yes' if keep else 'no', species if species else ','.join(self.all_species)))
+
+
+    def add_vcf_text(self, vcf_file):
+        self.endtxt.append("""VcfOutput(\\
+                file=vcfs/merged.vcf,\\
+                genotypes=(%s),\\
+                all=no,\\
+                reference=%s),\\"""%(','.join(self.species),self.reference_species))
+
+    def create_txt(self):
+        self.config_txt += """input.file=./merged.new_coords.maf
+    input.format=Maf
+    output.log=out.log
+    maf.filter=\\\n"""
+        with open(self.config_file,'w') as f:
+            print """IN DEV"""
+
+class MAF:
+    def __init__(self, maf_file, special_format = True):
+        self.maf_file = maf_file
+        self.special_format = special_format
+
+    def merge(self, new_maf_file='merged.maf'):
+        if '*' in new_maf_file:
+            maf_files = glob.glob(self.maf_file)
+        else:
+            maf_files = self.maf_file.split(',')
+        subprocess.call('rm %s'%new_maf_file,shell=True)
+        subprocess.call("(echo '##maf version=1'; ( cat %s | sed -e '/Anc/d;/#/d' ) ;) > %s"%(' '.join(maf_files),new_maf_file),shell=True)
+        self.maf_file = new_maf_file
+
+    def index(self):
+        idxs = []
+        with open(self.maf_file,'r') as f:
+            offset = 0
+            for line in iter(f.readline, ''):
+                if line.startswith('a'):
+                    idxs.append(offset)
+                offset = f.tell()
+            idxs.append(f.tell())
+        idxs = sorted(set(idxs))
+        self.idx = {idxs[i]:idxs[i+1] for i in range(len(idxs)-1)}
+        self.idxs = sorted(self.idx.keys())
+
+    def change_coordinates(self, reference_species,reference_species_chromosomes, changed_coordinates_file):
+        def change_segment(segment, ref_species, ref_species_chr):
+            aln_lines = segment.splitlines()
+            for i,line in enumerate(aln_lines):
+                if line.startswith('s'):
+                    lineList = line.split()
+                    orientation = lineList[4]
+                    lineList2 = lineList[1].split('.')
+                    lineList3 = lineList2[-1].split('_')[-2:]
+                    lineList2[-1] = lineList2[-1].replace('_'+'_'.join(lineList3),'')
+                    lineList[1] = '.'.join(lineList2[1:])
+                    if lineList2[0] == ref_species:
+                        chrom = lineList2[-1]
+                        lineList[5] = str(ref_species_chr[chrom])
+                        if orientation == '-':
+                            lineList[2] = str(ref_species_chr[chrom]-int(lineList3[-1])+int(lineList[2]))#-int(lineList[3]))
+                        else:
+                            lineList[2] = str(int(lineList3[-2]) + int(lineList[2]))
+                        position = int(lineList[2])
+                    else:
+                        lineList[2] = str(int(lineList3[-2]) + int(lineList[2]))
+                    aln_lines[i] = '\t'.join(lineList)
+            try:
+                return chrom,position,'\n'.join(sorted(filter(None,aln_lines)))+'\n\n'
+            except:
+                return '', '', ''
+
+        chunks = [self.idxs[i:i+50000] for i in range(0,len(self.idxs),50000)]
+        with open(self.maf_file,'r') as f, open(changed_coordinates_file,'w') as f2:
+            for chunk in chunks:
+                out_segments = []
+                for idx in chunk:
+                    f.seek(idx)
+                    chrom, position, segment = change_segment(f.read(self.idx[idx] - idx),reference_species,reference_species_chromosomes)
+                    if chrom:
+                        #maf_sort_structure.append((chrom, position, count))
+                        #count += 1
+                        out_segments.append(segment)
+                        #f2.write(segment)
+                f2.write(''.join(out_segments))
+        self.maf_file_new_coords = changed_coordinates_file
+
+    def strand(self, reference_species):
+        subprocess.call('./mafStrander -m %s --seq %s > temp.maf'%(self.maf_file,reference_species),shell=True)
+        subprocess.call('mv temp.maf %s'%self.maf_file)
+
+    def maf2vcf(self, species, reference_species, reference_species_fai):
+        """Run on a merged maf file first by using merger."""
+        reference_species_chromosomes = dict(zip(os.popen("awk '{print $1}' %s"%reference_species_fai).read().splitlines(),map(int,os.popen("awk '{print $2}' %s"%reference_fai_file).read().splitlines())))
+        try:
+            os.mkdir('vcfs')
+        except:
+            pass
+
+        self.strand(reference_species)
+
+        self.index()
+
+        self.change_coordinates(reference_species,reference_species_chromosomes, self.maf_file.replace('.maf','.new_coords.maf'))
+
+        with open('maf_filter_config.bpp','w') as f:
+            f.write("""
+        input.file=./merged.new_coords.maf
+        input.format=Maf
+        output.log=out.log
+        maf.filter=\\
+            Subset(\\
+                    strict=yes,\\
+                    keep=no,\\
+                    species=(%s),\\
+                    remove_duplicates=yes),\\
+            Subset(\\
+                    strict=yes,\\
+                    keep=yes,\\
+                    species=(%s),\\
+                    remove_duplicates=yes),\\
+            VcfOutput(\\
+                    file=vcfs/merged.vcf,\\
+                    genotypes=(%s),\\
+                    all=no,\\
+                    reference=%s)
+                """%(','.join(all_species),reference_species,','.join(species),reference_species))
+        subprocess.call('./maffilter param=maf_filter_config.bpp',shell=True)
+        concat_vcf('vcfs/merged.vcf','vcfs/final.vcf')
+        generate_new_header('vcfs/final.vcf')
+
+
+
 
 ###################
 #### SNP CLASS #### fixme vcf or tab file, as well as df, can local pca, local tree, final tree (run iqtree), visualize tree, produce enw vcf files and interact with other snp objects
@@ -420,7 +586,7 @@ def run_synteny_pipeline(query_protID,fasta_path,synteny_path,gff_path, bed_path
     gff_files = {protID:gff for protID,gff in gff_files.items() if protID in intersect_keys}
     genomes = {}
     pairwise_syntenies = []
-    for protID in gff_files:
+    for protID in intersect_keys:
         genomes[protID] = Genome(fasta_files[protID],bed_path+'/'+protID+'.bed',protID,gff_files[protID],gene_info)
         if circos:
             genomes[protID].export_karyotype(circos_inputs+'/'+protID+'.karyotype.txt')
@@ -487,11 +653,12 @@ def circos_dropper(fasta_path, gff_path, synteny_path, bed_path, circos_inputs, 
     genomes = {}
     pairwise_syntenies = []
     print gff_files, fasta_files
-    for protID in gff_files:
+    for protID in intersect_keys:
         genomes[protID] = Genome(fasta_files[protID],bed_path+'/'+protID+'.bed',protID,gff_files[protID],gene_info)
         genomes[protID].export_karyotype(circos_inputs+'/'+protID+'.karyotype.txt')
     print genomes
     synteny_files = glob.glob(synteny_path+'/*.unout')+glob.glob(synteny_path+'/*.lifted.anchors')
+    synteny_protIDs = []
     if synteny_files:
         for synteny_file in synteny_files:
             if synteny_file.endswith('.unout'):
@@ -499,25 +666,46 @@ def circos_dropper(fasta_path, gff_path, synteny_path, bed_path, circos_inputs, 
                 q_protID, s_prot_ID = map(lambda x: synteny_file[x+1:x+4],coords)
             else:
                 q_protID, s_prot_ID = tuple(synteny_file[synteny_file.rfind('/')+1:].split('.')[:2])
+            synteny_protIDs.extend([(q_protID, s_prot_ID),(s_prot_ID, q_protID)])
             pairwise_synteny = PairwiseSynteny(genomes[q_protID],genomes[s_prot_ID],synteny_file,loci_threshold=loci_threshold)
             pairwise_synteny.generate_synteny_structure(synteny_path)
             pairwise_syntenies.append(pairwise_synteny)
+        remaining_synteny = set(list(combinations(intersect_keys,r=2))) - set(synteny_protIDs)
     else:
-        for protID in gff_files:
+        remaining_synteny = list(combinations(intersect_keys,r=2))
+    if remaining_synteny:
+        #print remaining_synteny
+
+        def generate_CDS(protID):
+            print(protID)
+            genomes[protID].extract_CDS()
+            return protID
+        r = mp.ProcessingPool().amap(generate_CDS,list(set(reduce(lambda x,y: list(x)+list(y),remaining_synteny))))
+        r.wait()
+        protIDs = r.get()
+        print(protIDs)
+        #p = mp.ProcessingPool(ncpus=n_cpus)
+        #p.daemon = True
+        #r = p.amap(generate_CDS,list(set(reduce(lambda x,y: list(x)+list(y),remaining_synteny)))) # get pathos multiprocessing https://github.com/uqfoundation/pathos
+        #while not r.ready():
+        #    sleep(5)
+        #r.wait()
+        """
+        for protID in set(reduce(lambda x,y: list(x)+list(y),remaining_synteny)):
             proc = mp.Process(target=lambda: genomes[protID].extract_CDS, args=None)
             proc.daemon = True
             proc.start()
             while len(mp.active_childern()) > n_cpus:
                 sleep(1)
         while len(mp.active_childern()) > 0:
-            sleep(1)
+            sleep(1)"""
         # fixme add remaining prot ID feauture
-        pairwise_syntenies = []
 
         def mycallback(x):
             pairwise_syntenies.extend(x)
 
         def p_synteny(protIDs):
+            print(protIDs)
             q_protID, s_prot_ID = protIDs
             pairwise_synteny = PairwiseSynteny(genomes[q_protID],genomes[s_prot_ID],loci_threshold=loci_threshold)
             pairwise_synteny.generate_synteny_structure(synteny_path)
@@ -528,8 +716,9 @@ def circos_dropper(fasta_path, gff_path, synteny_path, bed_path, circos_inputs, 
             pairwise_synteny = PairwiseSynteny(genomes[q_protID],genomes[s_prot_ID],loci_threshold=loci_threshold)
             pairwise_synteny.generate_synteny_structure(synteny_path)
             pairwise_syntenies.append(pairwise_synteny)"""
-        r = mp.Pool(n_cpus).map_async(p_synteny,combinations(genomes.keys(),r=2),callback=mycallback)
+        r = mp.ProcessingPool(n_cpus).amap(p_synteny,remaining_synteny,callback=mycallback) # _async
         r.wait()
+        pairwise_syntenies.extend(r.get())
 
 
     for pairwise_synteny in pairwise_syntenies:
@@ -550,11 +739,12 @@ def circos_dropper(fasta_path, gff_path, synteny_path, bed_path, circos_inputs, 
 @click.option('-h2m', '--hal2maf_softlink', default = './hal2maf', show_default=True, help='Name of softlinked Progressive Cactus hal2maf program.', type=click.Path(exists=False))
 @click.option('-h2m', '--nickname_file', default = '', show_default=True, help='File containing protID nickname in each line for all protIDs, can omit this file by leaving it blank.', type=click.Path(exists=False))
 @click.option('-fi', '--fasta_path', default = './fasta_path/', show_default=True, help='Fasta path containing all of the input genomes. Genome naming must conform to xxx_[protID]_xxx.[fa/fasta].', type=click.Path(exists=False))
-def run_cactus(fasta_output_path,cactus_run_directory,cactus_softlink, cactus_env_softlink, n_cpus, hal2maf_softlink, nickname_file = '', fasta_path = ''): #fixme get rid of '' and add to command line tool
+@click.option('-s', '--submission_system', default = 'local', show_default=True, help='Different nextflow submission system to use.', type=click.Choice(['local','sge','slurm']))
+def run_cactus(fasta_output_path,cactus_run_directory,cactus_softlink, cactus_env_softlink, n_cpus, hal2maf_softlink, nickname_file, fasta_path, submission_system): #fixme get rid of '' and add to command line tool
     """Run multiple sequence alignment via Progressive Cactus on multiple species synteny blocks and export as maf files. Try to run softlink_cactus beforehand, else use official cactus paths instead of softlinks."""
     cactus_run_obj = CactusRun(fasta_output_path,cactus_run_directory,cactus_softlink, cactus_env_softlink, nickname_file, fasta_path)
     cactus_run_obj.write_fastas_seqfile()
-    cactus_run_obj.run_cactus()
+    cactus_run_obj.run_cactus(submission_system)
     cactus_run_obj.hal2maf(n_cpus, hal2maf_softlink)
 
 @joshuatree.command()
