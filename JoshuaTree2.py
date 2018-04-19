@@ -28,7 +28,7 @@ class SuperSynteny:
         self.max_distance = max_distance
         self.q_genome = q_genome
 
-    def generate_global_synteny_graph(self, fasta_out_dir):
+    def generate_global_synteny_graph(self, fasta_out_dir): # fixme add global synteny graph with no references... all sequences if syntenic Aij = 1, if within merge distance Aij = 1, just merge and output all connected components, probably easier and more straight forward, add global option for this, maybe separate method and circos_dropper like synteny computations, networkx plot final nodes
         global_synteny_indices = []
         for synteny in self.pairwise_syntenies.values():
             synteny.synteny_structure['name'] = np.array(synteny.synteny_structure.index)#synteny.synteny_structure['q_chr'] + '\t' + synteny.synteny_structure['q_xi'] + '\t' + synteny.synteny_structure['q_xf']#[['q_chr','q_xi','q_xf']]
@@ -39,7 +39,7 @@ class SuperSynteny:
         referenced_regions = list(global_synteny_matrix.index)
         regions = np.array(referenced_regions)[:,1].tolist()
         regions_bed_files = dict(zip(regions,map(lambda x: BedTool(x,from_string=True),regions)))
-        for region_i,region_j in combinations(regions,r=2) + zip(regions,regions):
+        for region_i,region_j in list(combinations(regions,r=2)) + zip(regions,regions):
             if region_i == region_j:
                     global_synteny_matrix.loc[pd.IndexSlice[:,region_i],pd.IndexSlice[:,region_i]] = 1
             else:
@@ -57,7 +57,7 @@ class SuperSynteny:
             for species in set(referenced_regions_s_species[:,0]):
                 s_regions = BedTool('\n'.join(np.vectorize(lambda region: region + '%s.%s'%(self.pairwise_syntenies[species].s_genome.protID,'_'.join(region)))(str(BedTool(map(lambda x: x.split(),np.vectorize(lambda x: '\t'.join(self.pairwise_syntenies[species].synteny_structure.loc[x,['s_chr','s_xi','s_xf']].as_matrix().tolist()))(referenced_regions_s_species[referenced_regions_s_species[:,0]==species,1]).tolist())).sort().merge(d=self.max_distance)).splitlines())),from_string=True).sequence(fi=self.pairwise_syntenies[species].s_genome.fasta,name=True)
                 out_fasta.append(s_regions)
-            with open(fasta_out_dir+'/'+'fasta_output%d.fasta'%i,'w') as f:
+            with open(fasta_out_dir+'/'+'FastaOut%d.fa'%i,'w') as f:
                 f.write(reduce(lambda x,y: x+'\n'+y,out_fasta))
 
 class PairwiseSynteny:
@@ -71,17 +71,22 @@ class PairwiseSynteny:
         """Take anchor file or synteny file and searches for starting and ending genes for each syntenic block"""
         if self.synteny_file.endswith('.unout'):
             self.unout2structure(self.q_genome, self.s_genome)
-        elif self.synteny_file.endswith('.anchors'):
+        elif self.synteny_file.endswith('.lifted.anchors'):
             self.anchor2structure(self.q_genome, self.s_genome)
         elif self.synteny_file.endswith('.bed'):
             self.import_synteny_structure()
         else:
             self.run_synteny(self.q_genome,self.s_genome,synteny_path)
             self.anchor2structure(self.q_genome, self.s_genome)
+        self.synteny_structure_index()
+
+    def synteny_structure_index(self):
+        self.synteny_structure = self.synteny_structure.rename(dict(zip(range(self.synteny_structure.shape[0]),self.synteny_structure['q_chr']+'\t'+self.synteny_structure['q_xi']+'\t'+self.synteny_structure['q_xf'])))
 
     def import_synteny_structure(self):
         self.synteny_structure = pd.read_table(self.synteny_file,header=None,names=['q_chr','q_xi','q_xf','s_chr','s_xi','s_xf'])
-        self.synteny_structure = self.synteny_structure.rename(dict(enumerate((self.synteny_structure['q_chr']+'\t'+self.synteny_structure['q_xi']+'\t'+self.synteny_structure['q_xf']).as_matrix().tolist())))
+        self.synteny_structure_index()
+        #self.synteny_structure = self.synteny_structure.rename(dict(enumerate((self.synteny_structure['q_chr']+'\t'+self.synteny_structure['q_xi']+'\t'+self.synteny_structure['q_xf']).as_matrix().tolist())))
 
     def unout2structure(self,q_genome,s_genome):
         with open(self.synteny_file,'r') as f:
@@ -94,14 +99,18 @@ class PairwiseSynteny:
                 q_genes, s_genes = anchor[:,2], anchor[:,5]
                 q_coords, s_coords = q_genome.df.loc[q_genes,:], s_genome.df.loc[s_genes,:]
                 synteny_structure.append([q_coords.iloc[0,0],q_coords[['xi','xf']].values.min(),q_coords[['xi','xf']].values.max(),s_coords.iloc[0,0],s_coords[['xi','xf']].values.min(),s_coords[['xi','xf']].values.max()])
-        self.synteny_structure = pd.DataFrame(synteny_structure,columns=['q_chr','q_xi','q_xf','s_chr','s_xi','s_xf'])#,index = np.vectorize(lambda x: '\t'.join(map(str,x[:3])))(synteny_structure))
+        self.synteny_structure = pd.DataFrame(synteny_structure,columns=['q_chr','q_xi','q_xf','s_chr','s_xi','s_xf']).astype(str)#,index = np.vectorize(lambda x: '\t'.join(map(str,x[:3])))(synteny_structure))
 
     def run_synteny(self,genome1,genome2, synteny_path):
         pwd = os.getcwd()
         os.chdir(synteny_path)
+        #subprocess.call('rm {0}/*.bck {0}/*.prj {0}/*.sds {0}/*.ssp {0}/*.suf {0}/*.tis {0}/*.des {0}/*.bed {0}/*.cds'.format(synteny_path),shell=True)
         for abs_path, link_name in zip([genome1.bed_file,genome2.bed_file,genome1.CDS_file,genome2.CDS_file],[genome1.protID+'.bed',genome2.protID+'.bed',genome1.protID+'.cds',genome2.protID+'.cds']):
             subprocess.call('ln -s %s %s'%(abs_path,link_name),shell=True)
-        subprocess.call('python -m jcvi.compara.catalog ortholog %s %s'%(genome1.short_name,genome2.short_name),shell=True)
+        try:
+            subprocess.call('python -m jcvi.compara.catalog ortholog --no_strip_names %s %s'%(genome1.short_name,genome2.short_name),shell=True)
+        except:
+            subprocess.call('python -m jcvi.compara.catalog ortholog --no_strip_names %s %s'%(genome1.short_name,genome2.short_name),shell=True)
         if genome1.short_name != genome1.protID and genome2.short_name != genome2.protID:
             subprocess.call('mv %s.%s.lifted.anchors %s.%s.lifted.anchors'%(genome1.short_name,genome2.short_name,genome1.protID,genome2.protID),shell=True)
         self.synteny_file = os.path.abspath('%s.%s.lifted.anchors'%(genome1.protID,genome2.protID))
@@ -296,25 +305,25 @@ class Circos:
 #### CACTUS RUN CLASS ####
 
 class CactusRun:
-    def __init__(self,fasta_output_path,cactus_run_directory,cactus_softlink, cactus_env_softlink, nickname_file = '', fasta_path = ''):
+    def __init__(self,fasta_output_path,cactus_run_directory,cactus_softlink, nickname_file = '', fasta_path = ''):
         self.fasta_output_path = fasta_output_path +'/'
         self.cactus_run_directory = cactus_run_directory +'/'
         self.cactus_output = self.cactus_run_directory+'output/'
         self.hal_path = self.cactus_output+'hal/'
-        self.cactus_softlink = os.path.abspath(cactus_softlink)
+        self.cactus_softlink = os.path.abspath(cactus_softlink+'/bin/progressiveCactus.sh')
         if not nickname_file:
             self.nickname_file = self.cactus_run_directory + 'prot_dict'
             self.protIDs = [fasta.split('_')[-2] for fasta in glob.glob(fasta_path+'/*.fa')+glob.glob(fasta_path+'/*.fasta')]
             with open(self.nickname_file,'w') as f:
                 f.write('\n'.join(['\t'.join((protID,)*2) for protID in self.protIDs]))
         self.nickname_file = nickname_file
-        self.cactus_env_softlink = cactus_env_softlink
+        self.cactus_env_softlink = os.path.abspath(cactus_softlink+'/environment')
         #subprocess.call('source %s'%cactus_env_softlink,shell=True)
 
     def write_fastas_seqfile(self):
         with open(self.nickname_file,'r') as f:
             self.nicknames = dict([tuple(line.split()) for line in f.read().splitlines() if line])
-        fastas = glob.glob(self.fasta_output_path+'/*.fa')+glob.glob(self.fasta_output_path+'/*.fasta')
+        fastas = glob.glob(self.fasta_output_path+'/FastaOut*.fa')+glob.glob(self.fasta_output_path+'/FastaOut*.fasta')
         self.run_files = []
         for fasta in fastas:
             self.nickname2file_dict = {}
@@ -609,7 +618,7 @@ def joshuatree():
 #### RUN SYNTENY ####
 
 @joshuatree.command() #fixme can use a combo of unout and anchor files, or generate new anchor files after reach end of synteny file list, but there should be more
-@click.option('-q', '--query_protID', default = 'xxx', show_default=True, help='Three number or letter proteome identifier of strain being compared against.')
+@click.option('-q', '--query_prot_id', default = 'xxx', show_default=True, help='Three number or letter proteome identifier of strain being compared against.')
 @click.option('-fi', '--fasta_path', default = './fasta_path/', show_default=True, help='Fasta path containing all of the input genomes. Genome naming must conform to xxx_[protID]_xxx.[fa/fasta].', type=click.Path(exists=False))
 @click.option('-s', '--synteny_path', default = './synteny_path/', show_default=True, help='Path containing synteny files, .unout or .anchors files. *.unout must conform to following pattern: [PAC4GC/PAC2_0].[q_protID]-[PAC4GC/PAC2_0].[s_protID]_5.unout; *.anchors must conform to: [q_protID].[s_protID].[*].anchors. Not neccessary to add files to this path, synteny will be generated if no specification.', type=click.Path(exists=False))
 @click.option('-gff', '--gff_path', default = './gff_path/', show_default=True, help='Gff path containing all of the gff/gff3 files. Gff naming must conform to: xxx.[protID].[gff/gff3].', type=click.Path(exists=False))
@@ -621,8 +630,9 @@ def joshuatree():
 @click.option('-c', '--circos', is_flag=True, help='If selected, visualize each pairwise alignment using Circos.')
 @click.option('-ci', '--circos_inputs', default = './circos_inputs/', show_default=True, help='Path containing all of circos inputs and configuration files.', type=click.Path(exists=False))
 @click.option('-co', '--circos_outputs', default = './circos_outputs/', show_default=True, help='Path containing all of circos output images.', type=click.Path(exists=False))
-def run_synteny_pipeline(query_protID,fasta_path,synteny_path,gff_path, bed_path, gene_info, fasta_out_dir, bps_threshold, loci_threshold, circos, circos_inputs, circos_outputs):
+def run_synteny_pipeline(query_prot_id,fasta_path,synteny_path,gff_path, bed_path, gene_info, fasta_out_dir, bps_threshold, loci_threshold, circos, circos_inputs, circos_outputs):
     """Stitch together many pairwise syntenic blocks into multiple species syntenic blocks and output as fasta files for a multiple sequence alignment. If synteny files are not supplied, conduct pairwise synteny between all included strains."""
+    query_protID = query_prot_id
     fasta_files = {fasta.split('_')[-2] : fasta for fasta in glob.glob(fasta_path+'/*.fa')+glob.glob(fasta_path+'/*.fasta')}
     gff_files = {gff.split('.')[-2] : gff for gff in glob.glob(gff_path+'/*.gff')+glob.glob(gff_path+'/*.gff3') }
     intersect_keys = set(fasta_files.keys()) & set(gff_files.keys())
@@ -643,10 +653,11 @@ def run_synteny_pipeline(query_protID,fasta_path,synteny_path,gff_path, bed_path
                 q_protID, s_prot_ID = map(lambda x: synteny_file[x+1:x+4],coords)
             else:
                 q_protID, s_prot_ID = tuple(synteny_file[synteny_file.rfind('/')+1:].split('.')[:2])
-            synteny_protIDs.append((q_protID, s_prot_ID))
-            pairwise_synteny = PairwiseSynteny(genomes[q_protID],genomes[s_prot_ID],synteny_file,loci_threshold=loci_threshold)
-            pairwise_synteny.generate_synteny_structure(synteny_path)
-            pairwise_syntenies.append(pairwise_synteny)
+            if q_protID == query_protID: # fixme for now... in future, implement -global option so all sequences can be included
+                synteny_protIDs.append((q_protID, s_prot_ID))
+                pairwise_synteny = PairwiseSynteny(genomes[q_protID],genomes[s_prot_ID],synteny_file,loci_threshold=loci_threshold)
+                pairwise_synteny.generate_synteny_structure(synteny_path)
+                pairwise_syntenies.append(pairwise_synteny)
         if len(pairwise_syntenies) < len(intersect_keys)-1:
             synteny_protIDs = set(np.array(synteny_protIDs)[:,1]).union({query_protID})
             remaining_protIDs = set(intersect_keys) - synteny_protIDs
@@ -657,12 +668,32 @@ def run_synteny_pipeline(query_protID,fasta_path,synteny_path,gff_path, bed_path
 
 
     if list(remaining_protIDs):
-        for protID in remaining_protIDs.union({query_protID}):
+        def generate_CDS(protID):
+            print(protID)
             genomes[protID].extract_CDS()
+            return protID
+        p = mp.ProcessingPool()
+        r = p.amap(generate_CDS,remaining_protIDs.union({query_protID}))
+        r.wait()
+        protIDs = r.get()
+        #for protID in remaining_protIDs.union({query_protID}):
+        #    genomes[protID].extract_CDS()
+
+        def p_synteny(s_prot_ID):
+            pairwise_synteny = PairwiseSynteny(genomes[query_protID],genomes[s_prot_ID],loci_threshold=loci_threshold)
+            pairwise_synteny.generate_synteny_structure(synteny_path)
+            return pairwise_synteny
+
+        r = p.amap(p_synteny,remaining_protIDs)#,callback=mycallback) # _async
+        r.wait()
+        pairwise_syntenies.extend(r.get())
+        p.close()
+
+        """
         for s_prot_ID in remaining_protIDs:
             pairwise_synteny = PairwiseSynteny(genomes[query_protID],genomes[s_prot_ID],loci_threshold=loci_threshold)
             pairwise_synteny.generate_synteny_structure(synteny_path)
-            pairwise_syntenies.append(pairwise_synteny)
+            pairwise_syntenies.append(pairwise_synteny)"""
 
     if circos:
         for pairwise_synteny in pairwise_syntenies:
@@ -724,7 +755,8 @@ def circos_dropper(fasta_path, gff_path, synteny_path, bed_path, circos_inputs, 
             print(protID)
             genomes[protID].extract_CDS()
             return protID
-        r = mp.ProcessingPool().amap(generate_CDS,list(set(reduce(lambda x,y: list(x)+list(y),remaining_synteny))))
+        p = mp.ProcessingPool(n_cpus)
+        r = p.amap(generate_CDS,list(set(reduce(lambda x,y: list(x)+list(y),remaining_synteny))))
         r.wait()
         protIDs = r.get()
         print(protIDs)
@@ -745,8 +777,8 @@ def circos_dropper(fasta_path, gff_path, synteny_path, bed_path, circos_inputs, 
             sleep(1)"""
         # fixme add remaining prot ID feauture
 
-        def mycallback(x):
-            pairwise_syntenies.extend(x)
+        #def mycallback(x):
+        #    pairwise_syntenies.extend(x)
 
         def p_synteny(protIDs):
             print(protIDs)
@@ -760,9 +792,10 @@ def circos_dropper(fasta_path, gff_path, synteny_path, bed_path, circos_inputs, 
             pairwise_synteny = PairwiseSynteny(genomes[q_protID],genomes[s_prot_ID],loci_threshold=loci_threshold)
             pairwise_synteny.generate_synteny_structure(synteny_path)
             pairwise_syntenies.append(pairwise_synteny)"""
-        r = mp.ProcessingPool(n_cpus).amap(p_synteny,remaining_synteny,callback=mycallback) # _async
+        r = p.amap(p_synteny,remaining_synteny)#,callback=mycallback) # _async
         r.wait()
         pairwise_syntenies.extend(r.get())
+        p.close()
 
 
     for pairwise_synteny in pairwise_syntenies:
@@ -777,29 +810,32 @@ def circos_dropper(fasta_path, gff_path, synteny_path, bed_path, circos_inputs, 
 @joshuatree.command()
 @click.option('-fo', '--fasta_output_path', default = './fasta_output/', show_default=True, help='Path containing all syntenic aligned regions, organized into fasta files for multiple sequence alignment via Cactus.', type=click.Path(exists=False))
 @click.option('-c', '--cactus_run_directory', default = './cactus_run/', show_default=True, help='Path containing all syntenic aligned regions, organized into fasta files for multiple sequence alignment via Cactus.', type=click.Path(exists=False))
-@click.option('-cac', '--cactus_softlink', default = './runProgressiveCactus.sh', show_default=True, help='Name of softlinked Progressive Cactus batch script file.', type=click.Path(exists=False))
-@click.option('-env', '--cactus_env_softlink', default = './cactus_environment', show_default=True, help='Name of softlinked Progressive Cactus virtual environment file.', type=click.Path(exists=False))
+#@click.option('-cac', '--cactus_softlink', default = './runProgressiveCactus.sh', show_default=True, help='Name of softlinked Progressive Cactus batch script file.', type=click.Path(exists=False))
+@click.option('-cac', '--cactus_softlink', default = './runProgressiveCactus/', show_default=True, help='Name of softlinked Progressive Cactus distribution.', type=click.Path(exists=False))
+#@click.option('-env', '--cactus_env_softlink', default = './cactus_environment', show_default=True, help='Name of softlinked Progressive Cactus virtual environment file.', type=click.Path(exists=False))
 @click.option('-n', '--n_cpus', default = 16, show_default=True, help='Number of cpus used to convert hal 2 maf files.')
 @click.option('-h2m', '--hal2maf_softlink', default = './hal2maf', show_default=True, help='Name of softlinked Progressive Cactus hal2maf program.', type=click.Path(exists=False))
 @click.option('-h2m', '--nickname_file', default = '', show_default=True, help='File containing protID nickname in each line for all protIDs, can omit this file by leaving it blank.', type=click.Path(exists=False))
 @click.option('-fi', '--fasta_path', default = './fasta_path/', show_default=True, help='Fasta path containing all of the input genomes. Genome naming must conform to xxx_[protID]_xxx.[fa/fasta].', type=click.Path(exists=False))
 @click.option('-s', '--submission_system', default = 'local', show_default=True, help='Different nextflow submission system to use.', type=click.Choice(['local','sge','slurm']))
-def run_cactus(fasta_output_path,cactus_run_directory,cactus_softlink, cactus_env_softlink, n_cpus, hal2maf_softlink, nickname_file, fasta_path, submission_system): #fixme get rid of '' and add to command line tool
+def run_cactus(fasta_output_path,cactus_run_directory,cactus_softlink, n_cpus, hal2maf_softlink, nickname_file, fasta_path, submission_system): #fixme get rid of '' and add to command line tool
     """Run multiple sequence alignment via Progressive Cactus on multiple species synteny blocks and export as maf files. Try to run softlink_cactus beforehand, else use official cactus paths instead of softlinks."""
-    cactus_run_obj = CactusRun(fasta_output_path,cactus_run_directory,cactus_softlink, cactus_env_softlink, nickname_file, fasta_path)
+    cactus_run_obj = CactusRun(fasta_output_path,cactus_run_directory,cactus_softlink, nickname_file, fasta_path)
     cactus_run_obj.write_fastas_seqfile()
     cactus_run_obj.run_cactus(submission_system)
     cactus_run_obj.hal2maf(n_cpus, hal2maf_softlink)
 
 @joshuatree.command()
 @click.option('-cd', '--cactus_distribution_dir', default = './progressiveCactus/', show_default=True, help='Path containing installed Progressive Cactus Distribution.', type=click.Path(exists=False))
-@click.option('-cac', '--softlink_cactus_name', default = './runProgressiveCactus.sh', show_default=True, help='Name of softlinked Progressive Cactus batch script file.', type=click.Path(exists=False))
-@click.option('-env', '--softlink_env_name', default = './cactus_environment', show_default=True, help='Name of softlinked Progressive Cactus virtual environment file.', type=click.Path(exists=False))
+#@click.option('-cac', '--softlink_cactus_name', default = './runProgressiveCactus.sh', show_default=True, help='Name of softlinked Progressive Cactus batch script file.', type=click.Path(exists=False))
+@click.option('-cac', '--softlink_cactus_name', default = './runProgressiveCactus/', show_default=True, help='Name of softlinked Progressive Cactus distribution.', type=click.Path(exists=False))
+#@click.option('-env', '--softlink_env_name', default = './cactus_environment', show_default=True, help='Name of softlinked Progressive Cactus virtual environment file.', type=click.Path(exists=False))
 @click.option('-h2m', '--softlink_hal2maf_name', default = './hal2maf', show_default=True, help='Name of softlinked Progressive Cactus hal2maf program.', type=click.Path(exists=False))
-def softlink_cactus(cactus_distribution_dir,softlink_cactus_name, softlink_env_name, softlink_hal2maf_name):
+def softlink_cactus(cactus_distribution_dir,softlink_cactus_name, softlink_hal2maf_name):
     """Softlink cactus distribution's cactus bash script, virtual environment, and hal2maf program. Useful if installed Cactus to particular directory and want to save time in referencing that directory when running cactus."""
-    subprocess.call('ln -s %s %s'%(os.path.abspath(cactus_distribution_dir+'/bin/runProgressiveCactus.sh'),softlink_cactus_name),shell=True)
-    subprocess.call('ln -s %s %s'%(os.path.abspath(cactus_distribution_dir+'/environment'),softlink_env_name),shell=True)
+    #subprocess.call('ln -s %s %s'%(os.path.abspath(cactus_distribution_dir+'/bin/runProgressiveCactus.sh'),softlink_cactus_name),shell=True)
+    #subprocess.call('ln -s %s %s'%(os.path.abspath(cactus_distribution_dir+'/environment'),softlink_env_name),shell=True)
+    subprocess.call('ln -s %s %s'%(os.path.abspath(cactus_distribution_dir),softlink_cactus_name),shell=True)
     subprocess.call('ln -s %s %s'%(os.path.abspath(cactus_distribution_dir+'/submodules/hal/bin/hal2mafMP.py'),softlink_hal2maf_name),shell=True)
 
 @joshuatree.command()
