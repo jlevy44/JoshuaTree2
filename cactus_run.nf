@@ -4,7 +4,7 @@
 //////////////////////////////////////////////////////////////////////////////////
 // parsing functions
 
-cactus_run_files = Channel.create(params.cactus_run_files.split(","));
+cactus_run_files = Channel.from(params.cactus_run_files.split(','));
 work_dir = params.work_dir;
 environment = params.environment;
 
@@ -14,7 +14,7 @@ environment = params.environment;
 process run_cactus{
 
     input:
-    file cactus_run_files
+    val cactus_run_files
 
     script:
     """

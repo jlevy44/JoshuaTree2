@@ -1,7 +1,7 @@
 #################
 #### IMPORTS ####
 
-import click, os, pandas as pd, numpy as np, subprocess
+import click, os, pandas as pd, numpy as np, subprocess, sys, shutil
 from pybedtools import BedTool
 from pyfaidx import Fasta
 from itertools import combinations
@@ -14,6 +14,10 @@ from Bio.Phylo.TreeConstruction import DistanceTreeConstructor, _DistanceMatrix
 from time import sleep
 from pathos import multiprocessing as mp
 from pathos.pp_map import ppmap
+from Bio import AlignIO
+from ete3 import PhyloTree, Tree,TreeStyle,NodeStyle,EvolTree
+import networkx as nx
+import matplotlib.pyplot as plt
 
 #################
 #### CLASSES ####
@@ -23,12 +27,74 @@ from pathos.pp_map import ppmap
 #### SYNTENY CLASSES ####
 
 class SuperSynteny:
-    def __init__(self, pairwise_syntenies, max_distance, q_genome):
+    def __init__(self, pairwise_syntenies, max_distance, q_genome = ''):
         self.pairwise_syntenies = {synteny.synteny_file: synteny for synteny in pairwise_syntenies}
         self.max_distance = max_distance
         self.q_genome = q_genome
 
-    def generate_global_synteny_graph(self, fasta_out_dir): # fixme add global synteny graph with no references... all sequences if syntenic Aij = 1, if within merge distance Aij = 1, just merge and output all connected components, probably easier and more straight forward, add global option for this, maybe separate method and circos_dropper like synteny computations, networkx plot final nodes
+    def generate_global_synteny_graph(self, fasta_out_dir, memory=150):
+        synteny_graph = nx.Graph()
+        for synteny in self.pairwise_syntenies.values():
+            synteny_graph.add_edges_from(zip(synteny.q_genome.protID+'.'+synteny.synteny_structure['q_chr']+'\t'+synteny.synteny_structure['q_xi']+'\t'+synteny.synteny_structure['q_xf'],
+                                             synteny.s_genome.protID+'.'+synteny.synteny_structure['s_chr']+'\t'+synteny.synteny_structure['s_xi']+'\t'+synteny.synteny_structure['s_xf']))
+        genomes = {genome.protID: genome for genome in set(reduce(lambda x,y: x+y,[[synteny.q_genome, synteny.s_genome] for synteny in self.pairwise_syntenies.values()]))}
+        nodes_all = np.array(synteny_graph.nodes())
+        if self.q_genome:
+            nodes = np.array(filter(lambda x: x.startswith(self.q_genome.protID), nodes_all))
+        else:
+            nodes = nodes_all
+        clustered_regions = BedTool('\n'.join(nodes),from_string=True).sort().cluster(d=self.max_distance).to_dataframe().astype(str)
+        nodes = nodes_all
+        clustered_regions = clustered_regions.rename(dict(enumerate(clustered_regions['chrom']+'\t'+clustered_regions['start']+'\t'+clustered_regions['end'])))
+        for cluster in clustered_regions['name'].unique():
+            synteny_graph.add_edges_from(list(combinations(list(clustered_regions[clustered_regions['name'] == cluster].index),r=2)))
+        synteny_graph.add_edges_from(zip(nodes,nodes))
+        connected_components = enumerate(list(nx.connected_components(synteny_graph)))
+        #species_colors = {species:i for i,species in enumerate(genomes.keys())}
+        #node_labels = {}
+        #for i, regions in connected_components:
+        #    for region in regions:
+        #        node_labels[region] = species_colors[region.split('.')[0]]#i
+        #plt.figure()
+        #nx.draw_spectral(synteny_graph,node_color=np.vectorize(lambda x: node_labels[x])(nodes),arrows=False,node_size=10)
+        #plt.savefig('./'+'spectral_layout.png',dpi=300)
+        for i, regions in connected_components:#list(nx.connected_component_subgraphs(synteny_graph)):
+            regions = BedTool('\n'.join(regions),from_string=True).sort().merge(d=self.max_distance).to_dataframe().astype(dict(chrom=str,start=int,end=int))
+            regions['species'] = regions['chrom'].map(lambda x: x.split('.')[0])
+            regions['chrom'] = regions['chrom'].map(lambda x: x.split('.',1)[1])
+            print(regions)
+
+            with open(fasta_out_dir+'fasta_output.fa','w') as f:
+                for species in regions['species'].unique():
+                    f.write('\n'.join(['>%s.%s_%d_%d\n%s'%(species, chrom, start, end, str(genomes[species].fasta[chrom][start:end])) for chrom, start, end, species in map(tuple,regions[regions['species'] == species].values)]) + '\n')
+            subprocess.call('reformat.sh overwrite=true in=%s out=%s fastawrap=60 Xmx=%dG && rm %s'%(fasta_out_dir+'fasta_output.fa',fasta_out_dir+'FastaOut%d.fasta'%i,memory,fasta_out_dir+'fasta_output.fa') , shell=True)
+        #global_synteny_matrix = nx.to_scipy_sparse_matrix(synteny_graph,nodelist=nodes)
+        #n_components, connected_components = sps.csgraph.connected_components(global_synteny_matrix,directed=False)
+        #for connected_component in connected_components:
+        #    regions = np.
+        self.synteny_graph = synteny_graph
+        self.genomes = genomes
+
+    def visualize_synteny_graph(self, work_dir = './'):
+        work_dir += '/'
+        nodes = np.array(self.synteny_graph.nodes())
+        connected_components = enumerate(list(nx.connected_components(self.synteny_graph)))
+        species_colors = {species:i for i,species in enumerate(self.genomes.keys())}
+        node_labels_species = {}
+        node_labels_component = {}
+        for i, regions in connected_components:
+            for region in regions:
+                node_labels_species[region] = species_colors[region.split('.')[0]]#i
+                node_labels_component[region] = i
+        plt.figure()
+        nx.draw_spectral(self.synteny_graph,node_color=np.vectorize(lambda x: node_labels_species[x])(nodes),arrows=False,node_size=10)
+        plt.savefig(work_dir+'spectral_layout_species.png',dpi=300)
+        plt.figure()
+        nx.draw_spectral(self.synteny_graph,node_color=np.vectorize(lambda x: node_labels_component[x])(nodes),arrows=False,node_size=10)
+        plt.savefig(work_dir+'spectral_layout_component.png',dpi=300)
+
+
+    def generate_global_synteny_graph_reference(self, fasta_out_dir): # fixme add global synteny graph with no references... all sequences if syntenic Aij = 1, if within merge distance Aij = 1, just merge and output all connected components, probably easier and more straight forward, add global option for this, maybe separate method and circos_dropper like synteny computations, networkx plot final nodes
         global_synteny_indices = []
         for synteny in self.pairwise_syntenies.values():
             synteny.synteny_structure['name'] = np.array(synteny.synteny_structure.index)#synteny.synteny_structure['q_chr'] + '\t' + synteny.synteny_structure['q_xi'] + '\t' + synteny.synteny_structure['q_xf']#[['q_chr','q_xi','q_xf']]
@@ -37,7 +103,19 @@ class SuperSynteny:
         global_synteny_matrix = pd.DataFrame(np.zeros((len(global_synteny_indices),)*2),index=global_synteny_indices,columns=global_synteny_indices)
         global_synteny_matrix = global_synteny_matrix.sort_index(axis=0).sort_index(axis=1)
         referenced_regions = list(global_synteny_matrix.index)
-        regions = np.array(referenced_regions)[:,1].tolist()
+        clustered_regions = BedTool(np.array(referenced_regions)[:,1].tolist()).sort().cluster(d=self.max_distance).to_dataframe().astype(str)
+        #print(clustered_regions)
+        clustered_regions = clustered_regions.rename(dict(enumerate(clustered_regions['chrom']+'\t'+clustered_regions['start']+'\t'+clustered_regions['end'])))
+
+        for cluster in clustered_regions['name'].unique():
+            list_regions = list(clustered_regions[clustered_regions['name'] == cluster].index)
+            for region_i,region_j in list(combinations(list_regions,r=2)):
+                global_synteny_matrix.loc[pd.IndexSlice[:,region_i],pd.IndexSlice[:,region_j]] = 1
+                global_synteny_matrix.loc[pd.IndexSlice[:,region_j],pd.IndexSlice[:,region_i]] = 1
+            for region_i in list_regions:
+                global_synteny_matrix.loc[pd.IndexSlice[:,region_i],pd.IndexSlice[:,region_i]] = 1 # fixme add global mode
+
+        """
         regions_bed_files = dict(zip(regions,map(lambda x: BedTool(x,from_string=True),regions)))
         for region_i,region_j in list(combinations(regions,r=2)) + zip(regions,regions):
             if region_i == region_j:
@@ -46,7 +124,7 @@ class SuperSynteny:
                 distance = int(str(regions_bed_files[region_i].closest(regions_bed_files[region_j],d=True)).split('\t')[-1])
                 if distance >=0 and distance <= self.max_distance:
                     global_synteny_matrix.loc[pd.IndexSlice[:,region_i],pd.IndexSlice[:,region_j]] = 1
-                    global_synteny_matrix.loc[pd.IndexSlice[:,region_j],pd.IndexSlice[:,region_i]] = 1
+                    global_synteny_matrix.loc[pd.IndexSlice[:,region_j],pd.IndexSlice[:,region_i]] = 1"""
         n_components, connected_components = sps.csgraph.connected_components(global_synteny_matrix.as_matrix())
         referenced_regions = np.array(referenced_regions)
         for i,connected_component_list in enumerate(connected_components):
@@ -59,6 +137,12 @@ class SuperSynteny:
                 out_fasta.append(s_regions)
             with open(fasta_out_dir+'/'+'FastaOut%d.fa'%i,'w') as f:
                 f.write(reduce(lambda x,y: x+'\n'+y,out_fasta))
+
+    def test(self,region1, region2):
+        syntenic_sequences = ['future_testing_in_development_global_mode']
+        region1 = region1.split()
+        region2 = region2.split()
+        return 1 if region1 == region2 or (region1[0] == region2[0] and (int(region1[2]) + self.max_distance >= int(region2[1]) or int(region2[2]) + self.max_distance >= int(region1[1]))) or (region1,region2) in syntenic_sequences else 0
 
 class PairwiseSynteny:
     def __init__(self, q_genome, s_genome, synteny_file='', loci_threshold = 4):
@@ -122,7 +206,6 @@ class PairwiseSynteny:
             anchors = f.read().split('###')[1:]
         synteny_structure = []
         for anchor in anchors:
-            #print anchor
             if anchor:
                 genes = np.array([line.split()[:2] for line in anchor.splitlines() if line])
                 if genes.shape[0] >= self.loci_threshold:
@@ -130,7 +213,7 @@ class PairwiseSynteny:
                     q_coords, s_coords = q_genome.df.loc[q_genes,:], s_genome.df.loc[s_genes,:]
                     #print q_coords[['xi','xf']]
                     synteny_structure.append([q_coords.iloc[0,0],q_coords[['xi','xf']].values.min(),q_coords[['xi','xf']].values.max(),s_coords.iloc[0,0],s_coords[['xi','xf']].values.min(),s_coords[['xi','xf']].values.max()])
-        self.synteny_structure = pd.DataFrame(synteny_structure,columns=['q_chr','q_xi','q_xf','s_chr','s_xi','s_xf'])
+        self.synteny_structure = pd.DataFrame(synteny_structure,columns=['q_chr','q_xi','q_xf','s_chr','s_xi','s_xf']).astype(str)
 
     def synteny_structure_2_bed(self,filename):
         self.synteny_structure.to_csv(filename,sep='\t',index=False,header=None)
@@ -316,54 +399,63 @@ class CactusRun:
             self.protIDs = [fasta.split('_')[-2] for fasta in glob.glob(fasta_path+'/*.fa')+glob.glob(fasta_path+'/*.fasta')]
             with open(self.nickname_file,'w') as f:
                 f.write('\n'.join(['\t'.join((protID,)*2) for protID in self.protIDs]))
-        self.nickname_file = nickname_file
+        else:
+            self.nickname_file = nickname_file
         self.cactus_env_softlink = os.path.abspath(cactus_softlink+'/environment')
         #subprocess.call('source %s'%cactus_env_softlink,shell=True)
+
+    def fasta2seq(self, fasta):
+        self.nickname2file_dict = {}
+        self.fasta_run_dir = self.cactus_output+fasta[fasta.rfind('/')+1:].split('.')[0]+'/'
+        try:
+            os.mkdir(self.fasta_run_dir)
+        except:
+            pass
+        subprocess.call('rm %s/*.fa %s/*.fasta -r'%(self.fasta_run_dir,self.fasta_run_dir),shell=True)
+        with open(fasta) as f1:
+            records = SeqIO.parse(f1,'fasta')
+            for record in records:
+                protID = record.id.split('.')[0]
+                nickname = self.nicknames[protID]
+                record.id = record.id.replace(protID,nickname)
+                record.description = record.id
+                SeqIO.write(record, open(self.fasta_run_dir+nickname+'.fa','a'),'fasta')
+                self.nickname2file_dict[nickname] = os.path.abspath(self.fasta_run_dir+nickname+'.fa')
+        self.generate_trees()
+        self.seqfile = self.fasta_run_dir+'seqfile'
+        with open(self.fasta_run_dir+'output_tree.nh','r') as f1, open(self.seqfile,'w') as f2:
+            f2.write(f1.read()+'\n'+'\n'.join(['%s %s'%(nickname, nickname_file) for nickname, nickname_file in self.nickname2file_dict.items()]))
+        run_file = os.path.abspath(self.seqfile+'.sh')
+        self.run_files.append(run_file)
+        with open(run_file,'w') as f:
+            f.write('#!/bin/bash\nexport _JAVA_OPTIONS="-Xmx155g"\n%s --maxThreads 16 %s %s %s >& %s\nscp %s %s'%(os.path.abspath(self.cactus_output),self.seqfile,self.fasta_run_dir,fasta.replace('.fasta','.hal'),self.seqfile+'.sh.stdout',fasta.replace('.fasta','.hal'),self.hal_path+fasta.split('/')[-1].replace('.fasta','.hal')))
+        return run_file
 
     def write_fastas_seqfile(self):
         with open(self.nickname_file,'r') as f:
             self.nicknames = dict([tuple(line.split()) for line in f.read().splitlines() if line])
         fastas = glob.glob(self.fasta_output_path+'/FastaOut*.fa')+glob.glob(self.fasta_output_path+'/FastaOut*.fasta')
         self.run_files = []
-        for fasta in fastas:
-            self.nickname2file_dict = {}
-            self.fasta_run_dir = self.cactus_output+fasta[fasta.rfind('/')+1:].split('.')[0]+'/'
-            try:
-                os.mkdir(self.fasta_run_dir)
-            except:
-                pass
-            subprocess.call('rm %s/*.fa %s/*.fasta -r'%(self.fasta_run_dir,self.fasta_run_dir),shell=True)
-            with open(fasta) as f1:
-                records = SeqIO.parse(f1,'fasta')
-                for record in records:
-                    protID = record.id.split('.')[0]
-                    nickname = self.nicknames[protID]
-                    record.id = record.id.replace(protID,nickname)
-                    record.description = record.id
-                    SeqIO.write(record, open(self.fasta_run_dir+nickname+'.fa','a'),'fasta')
-                    self.nickname2file_dict[nickname] = os.path.abspath(self.fasta_run_dir+nickname+'.fa')
-            self.generate_trees()
-            self.seqfile = self.fasta_run_dir+'seqfile'
-            with open(self.fasta_run_dir+'output_tree.nh','r') as f1, open(self.seqfile,'w') as f2:
-                f2.write(f1.read()+'\n'+'\n'.join(['%s %s'%(nickname, nickname_file) for nickname, nickname_file in self.nickname2file_dict.items()]))
-            run_file = os.path.abspath(self.seqfile+'.sh')
-            self.run_files.append(run_file)
-            with open(run_file,'w') as f:
-                f.write('#!/bin/bash\nexport _JAVA_OPTIONS="-Xmx155g"\n%s --maxThreads 16 %s %s %s >& %s\nscp %s %s'%(os.path.abspath(self.cactus_output),self.seqfile,self.fasta_run_dir,fasta.replace('.fa','.hal'),self.seqfile+'.sh.stdout',fasta.replace('.fa','.hal'),self.hal_path+fasta.split('/')[-1].replace('.fa','.hal')))
+        fasta2seq = lambda fasta: self.fasta2seq(fasta)
+        p = mp.ProcessingPool()
+        r = p.amap(fasta2seq,fastas)
+        r.wait()
+        self.run_files = r.get()
+        p.close()
 
     def run_cactus(self, submission = 'local'):
         with open('nextflow.config','w') as f:
-            f.write('\n'.join(["process.%s = '%s'"%(i,j) for i,j in zip(['executor','memory'],[submission,'155G'])]))
-        subprocess.call("nextflow run run_cactus.nf --work_dir %s --cactus_run_files %s --environment %s"%(os.getcwd(),','.join(os.path.abspath(run_file) for run_file in self.run_files),os.path.abspath(self.cactus_env_softlink)),shell=True)
+            f.write('\n'.join(["process.%s = '%s'"%(i,j) for i,j in zip(['executor','memory', 'clusterOptions'],[submission,'155G', '' if submission != 'sge' else '-P plant-analysis.p -cwd -l h_rt=24:00:00 -pe pe_slots 16 -e OutputFile.txt'])]))
+        subprocess.call("nextflow cactus_run.nf --work_dir %s --cactus_run_files %s --environment %s"%(os.getcwd(),','.join(os.path.abspath(run_file) for run_file in self.run_files),os.path.abspath(self.cactus_env_softlink)),shell=True)
         #for run_file in self.run_files:
         #    subprocess.call('nohup sh %s &'%(run_file),shell=True)
     # fixme, make sure to activate progressive cactus environment; sourcec environment in cactus folder, add hal2maf, send maf 2 cns analysis, parallelize and pipeline all scripts, maybe call nextflow from within python for each of the jobs for pipeline submission
 
     def generate_trees(self,scaled = 10000, kmer_length = 23, multi_fasta = False):
         # fixme use mafft to generate new guide trees for each set of input fasta files
-        subprocess.call('sourmash compute -f --scaled %d %s -o %s.sig -k %d %s'%(scaled,self.fasta_run_dir,self.fasta_run_dir+'tree',kmer_length,'--singleton' if multi_fasta else ''),shell=True)
+        subprocess.call('sourmash compute -f --scaled %d %s/*.fa -o %s.sig -k %d %s'%(scaled,self.fasta_run_dir,self.fasta_run_dir+'tree',kmer_length,'--singleton' if multi_fasta else ''),shell=True)
         subprocess.call('sourmash compare %s.sig --csv %s.cmp.csv'%(self.fasta_run_dir+'tree',self.fasta_run_dir+'tree'),shell=True)
-        df = pd.read_csv('%s.cmp.csv'%self.fasta_run_dir+'tree',index_col = None)
+        df = pd.read_csv('%s.cmp.csv'%(self.fasta_run_dir+'tree'),index_col = None)
         samples = [fasta.split('/')[-1].replace('.fa','') for fasta in list(df)]
         distance_matrix = df.as_matrix()
         constructor = DistanceTreeConstructor()
@@ -375,6 +467,11 @@ class CactusRun:
         self.hal2maf_softlink = hal2maf_softlink
         self.maf_path = self.hal_path.replace('hal','maf')
         run_hal = lambda hal: self.run_hal2maf(hal)
+        p = mp.ProcessingPool()
+        r = p.amap(run_hal, glob.glob(self.hal_path+'/*.hal'))
+        r.wait()
+        p.close()
+        """
         for hal in glob.glob(self.hal_path+'/*.hal'):
             proc = mp.Process(target=run_hal, args=(hal,))
             proc.daemon = True
@@ -382,7 +479,7 @@ class CactusRun:
             while len(mp.active_childern()) > n_cpus:
                 sleep(1)
         while len(mp.active_childern()) > 0:
-            sleep(1)
+            sleep(1)"""
 
     def run_hal2maf(self,hal):
         os.system('%s %s %s'%(self.hal2maf_softlink, hal, hal.replace('hal','maf')))
@@ -507,7 +604,7 @@ class MAF:
         subprocess.call('./mafStrander -m %s --seq %s > temp.maf'%(self.maf_file,reference_species),shell=True)
         subprocess.call('mv temp.maf %s'%self.maf_file)
 
-    def maf2vcf(self, maf_filter_config, species, reference_species, reference_species_fai, vcf_out):
+    def maf2vcf(self, maf_filter_config, species, reference_species, reference_species_fai, vcf_out, change_coordinates = True):
         """Run on a merged maf file first by using merger."""
         reference_species_chromosomes = dict(zip(os.popen("awk '{print $1}' %s"%reference_species_fai).read().splitlines(),map(int,os.popen("awk '{print $2}' %s"%reference_species_fai).read().splitlines())))
         try:
@@ -519,7 +616,10 @@ class MAF:
 
         self.index()
 
-        self.change_coordinates(reference_species,reference_species_chromosomes, self.maf_file.replace('.maf','.new_coords.maf'))
+        if change_coordinates:
+            self.change_coordinates(reference_species,reference_species_chromosomes, self.maf_file.replace('.maf','.new_coords.maf'))
+        else:
+            self.maf_file_new_coords = self.maf_file
 
         self.config = MAF_filter_config(maf_filter_config, self.maf_file_new_coords, species, reference_species)
         self.config.add_subset_text(keep=False)
@@ -572,13 +672,13 @@ class SNP:
                     f.write(line)
                 f.write(f2.read())
             subprocess.call('mv %s %s'%(vcf_out.replace('.vcf','.headers.vcf'),vcf_out),shell=True)
-            self.vcf_file = vcf_out
+            self.snp_file = vcf_out
         else:
             print('File(s) must be in vcf/vcf.gz format before proceeding.')
 
     def generate_new_header(self, vcf_out):
         if self.format == 'vcf':
-            sort_vcf_in = self.vcf_file
+            sort_vcf_in = self.snp_file
             header_line = '\n'+os.popen("grep '^#CHROM' %s"%sort_vcf_in).read().strip('\n')
             chrms = set(os.popen("awk '{ print $1}' %s | grep -v ^#"%sort_vcf_in).read().splitlines())
             new_lines = """##fileformat=VCFv4.1\n"""+'\n'.join(sorted(['##contig=<ID=' + chrm + ',length=' + os.popen('grep %s %s | tail -n 1'%(chrm,sort_vcf_in)).read().strip('/n').split()[1] + '>' for chrm in chrms]))+'\n'+'\n'.join(['##FILTER=<ID=gap,Description="At least one sequence contains a gap">','##FILTER=<ID=unk,Description="At least one sequence contains an unresolved character">','##FILTER=<ID=gunk,Description="At least one sequence contains an unresolved character and gap.">','##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">'])+header_line
@@ -594,12 +694,145 @@ class SNP:
             subprocess.call("""(cat new_header.txt;
                                 cat %s | grep -v ^#;) \
                                 > %s"""%(sort_vcf_in.replace('.vcf','.new_head.vcf'),vcf_out),shell=True)# sort_vcf_in.replace('.vcf','.new_head_final.vcf')
-            self.vcf_file = vcf_out
+            self.snp_file = vcf_out
         else:
             print('File must be in vcf format before proceeding.')
 
+    def merge_vcf(self, vcf_out, excluded_species, reference_species, *list_vcf_obj):
+        #list_vcfs = list_vcfs.split(',')
+        list_vcfs = [vcf_obj.snp_file for vcf_obj in list_vcf_obj]
+        excluded_species = ','.join(excluded_species.split(',')+['%d:%s'%(i+2,reference_species) for i in range(len(list_vcfs) - 1)])
+        list_vcfs2 = []
+        for vcf in list_vcfs:
+            subprocess.call("(cat %s | grep ^# ; bedtools intersect -a %s -b %s ;) > %s"%(vcf,vcf,' '.join([v for v in list_vcfs if v != vcf]),vcf.replace('.vcf','.intersect.vcf')),shell=True)
+            vcf = vcf.replace('.vcf','.intersect.vcf')
+            subprocess.call('bcftools view %s -O z -o %s'%(vcf, vcf+'.gz'),shell=True)
+            subprocess.call('bcftools index %s.gz'%vcf,shell=True)
+            list_vcfs2.append(vcf)
+        subprocess.call('bcftools merge %s -O v --force-samples -o %s.gz'%(' '.join([vcf+'.gz' for vcf in list_vcfs2]), vcf_out),shell=True)
+        subprocess.call('bcftools view %s -O v -s ^%s -o %s'%(vcf_out+'.gz',excluded_species,vcf_out), shell=True)
+        return SNP(vcf_out)
+
+    def vcf2tab(self,tab_out):
+        subprocess.call("bcftools query -Hf '%%CHROM\\t%%POS\\t%%REF[\\t%%TGT]\\n' -o %s %s"%(tab_out,self.snp_file),shell=True)
+        self.tab = tab_out
+
+    def tab2fasta(self, fasta_out, sample = 0, tab_in = '', df = ''):
+        if tab_in:
+            self.tab = tab_in
+        if not list(df):
+            sample = int(sample)
+            df = pd.read_table(self.tab,header=0)
+            if sample:
+                df = df.sample(n=sample)
+        with open(fasta_out,'w') as f:
+            for col in list(df)[3:]:
+                species = col[col.find(']')+1:col.rfind(':')]
+                f.write('>%s\n%s\n'%(species,''.join((df[col].as_matrix())).replace('.','-').replace('*','-')))
+        return fasta_aln(fasta_out)
+
+    def intersect_vcf(self, bed_regions, vcf_out):
+        subprocess.call('bedtools intersect -wa -a %s -b %s > %s'%(self.snp_file, bed_regions, vcf_out),shell=True)
+        return SNP(vcf_out)
+
+    def visualize_distribution(self, work_dir):
+        import seaborn as sns, matplotlib.pyplot as plt
+        work_dir += '/'
+        df = pd.read_table(self.snp_file,header=next(i for i,line in enumerate(open(self.snp_file,'r')) if line.startswith('#CHROM')))
+        for chrom in df['#CHROM'].unique():
+            dff = df[df['#CHROM'] == chrom]
+            plt.figure()
+            sns.distplot(dff['POS'].as_matrix())
+            plt.title(chrom + ' SNP distribution')
+            plt.savefig(work_dir+chrom+'_snp_distribution.png',dpi=300)
+
+    def erase_indels(self, vcf_out):
+        subprocess.call("vcftools --vcf %s --remove-indels --recode --recode-INFO-all --out %s"%(self.snp_file,vcf_out),shell=True)
+        return SNP(vcf_out)
+
+class fasta_aln:
+    def __init__(self, fasta):
+        self.fasta = fasta
+
+    def to_snp(self, vcf_out ,fasta_out ,monomorphic):
+        subprocess.call('snp-sites -v%s -o %s %s'%('b' if int(monomorphic) else '',vcf_out,self.fasta),shell=True)
+        subprocess.call('snp-sites -m%s -o %s %s'%('b' if int(monomorphic) else '',fasta_out,self.fasta),shell=True)
+        return SNP(vcf_out), fasta_aln(fasta_out)
+
+    def generate_tree(self, phylogeny, fasta_in, tree_out = './out.treefile', model='MF',bootstrap=1, n_threads = 'AUTO'):
+        return_tree = 1
+        if phylogeny == 'iqtree':
+            iqtree_line = next(path for path in sys.path if 'conda/' in path and '/lib/' in path).split('/lib/')[0]+'/bin/ete3_apps/bin/iqtree'
+            subprocess.call('rm %s.ckp.gz'%fasta_in,shell=True)
+            subprocess.call(iqtree_line + ' -s %s -m %s -nt %s %s'%(fasta_in,model,n_threads,'-b %d'%int(bootstrap) if int(bootstrap) > 1 else ''), shell=True) #GTR
+            shutil.copy(fasta_in+'.treefile',tree_out)
+        elif phylogeny == 'phyml':
+            phylip_in = fasta_in
+            if not phylip_in.endswith('.phylip'):#phylip_in.endswith('.fasta') or phylip_in.endswith('.fa'): #FIXME can add biopython conversion
+                #subprocess.call(['perl', fasta2phylip, phylip_in, phylip_in.replace('fasta','phylip').replace('fa','phylip')])
+                phylip_in = fasta_in.replace('fasta','phylip').replace('fa','phylip')
+                AlignIO.convert(fasta_in,'fasta',phylip_in,'phylip-relaxed')
+            phymlLine = next(path for path in sys.path if 'conda/' in path and '/lib/' in path).split('/lib/')[0]+'/bin/ete3_apps/bin/phyml'
+            subprocess.call([phymlLine, '-i', phylip_in, '-s', 'BEST', '-q', '-b', bootstrap, '-m', 'GTR'])
+            if tree_out:
+                shutil.copy(phylip_in+'_phyml_tree.txt',tree_out)
+        elif phylogeny == 'fasttree':
+            fasttreeLine = next(path for path in sys.path if 'conda/' in path and '/lib/' in path).split('/lib/')[0]+'/bin/ete3_apps/bin/FastTree'
+            subprocess.call(fasttreeLine + ' -gtr -nt < ' + fasta_in + ' > ' + tree_out, shell=True)
+        else:
+            print('Please select different phylogenetic analysis tool [iqtree|phyml|fasttree].')
+            return_tree = 0
+        if return_tree:
+            return TreeObj(tree_out)
+
+class TreeObj:
+    def __init__(self, treefile):
+        self.treefile = treefile
+
+    def reroot(self, root_species, tree_out):
+        t = PhyloTree(open(self.treefile,'r').read())
+        t.set_outgroup(root_species)
+        t.write(tree_out)
+        self.treefile = tree_out
+
+    def tree2matrix(self, distance_matrix = 'distance_matrix.csv'):
+        tree = Phylo.read(self.treefile,'newick')
+        allclades = list(tree.find_clades(order='level'))
+        species_names = [clade.name for clade in allclades if clade.name]
+        df = pd.DataFrame(np.nan, index=species_names, columns=species_names)
+        for i,j in combinations(species_names,r=2):
+            if i == j:
+                df.set_value(i,j,0)
+            if i != j:
+                distance = tree.distance(i,j)
+                df.set_value(i,j,distance)
+                df.set_value(j,i,distance)
+        df_keys = sorted(list(df))
+        df = df.reindex(index=df_keys,columns=df_keys)
+        df.to_csv(distance_matrix)
+        return df
+
+    def output_tree_image(self, fasta_obj, output_image):
+        if fasta_obj.fasta.endswith('.fasta') or fasta_obj.fasta.endswith('.fa'):
+            subprocess.call("awk '{ if ($0 !~ />/) {print toupper($0)} else {print $0} }' %s > aln.fasta"%fasta_obj.fasta,shell=True)
+            t = PhyloTree(self.treefile,alignment='aln.fasta',alg_format='fasta')
+        else:
+            t = Tree(self.treefile)
+        ts = TreeStyle()
+        ns = NodeStyle()
+        ns['size']=0
+        ts.show_leaf_name = True
+        ts.show_branch_length = False
+        ts.show_branch_support = True
+        for n in t.traverse():
+            n.set_style(ns)
+        t.render(output_image,tree_style = ts, dpi=300)
+
+
+
+
 ###################
-#### CNS CLASS ####
+#### CNS CLASS #### # fixme interface circos plots with CNS analysis, plot density of elements
 
 #######################
 #### RUN CLI GROUP ####
@@ -618,7 +851,7 @@ def joshuatree():
 #### RUN SYNTENY ####
 
 @joshuatree.command() #fixme can use a combo of unout and anchor files, or generate new anchor files after reach end of synteny file list, but there should be more
-@click.option('-q', '--query_prot_id', default = 'xxx', show_default=True, help='Three number or letter proteome identifier of strain being compared against.')
+@click.option('-q', '--query_prot_id', default = 'all', show_default=True, help='Three number or letter proteome identifier of strain being compared against. If all selected, then synteny graph will be created by running pairwise comparisons between all species.')
 @click.option('-fi', '--fasta_path', default = './fasta_path/', show_default=True, help='Fasta path containing all of the input genomes. Genome naming must conform to xxx_[protID]_xxx.[fa/fasta].', type=click.Path(exists=False))
 @click.option('-s', '--synteny_path', default = './synteny_path/', show_default=True, help='Path containing synteny files, .unout or .anchors files. *.unout must conform to following pattern: [PAC4GC/PAC2_0].[q_protID]-[PAC4GC/PAC2_0].[s_protID]_5.unout; *.anchors must conform to: [q_protID].[s_protID].[*].anchors. Not neccessary to add files to this path, synteny will be generated if no specification.', type=click.Path(exists=False))
 @click.option('-gff', '--gff_path', default = './gff_path/', show_default=True, help='Gff path containing all of the gff/gff3 files. Gff naming must conform to: xxx.[protID].[gff/gff3].', type=click.Path(exists=False))
@@ -645,7 +878,8 @@ def run_synteny_pipeline(query_prot_id,fasta_path,synteny_path,gff_path, bed_pat
         if circos:
             genomes[protID].export_karyotype(circos_inputs+'/'+protID+'.karyotype.txt')
     synteny_files = glob.glob(synteny_path+'/*.unout')+glob.glob(synteny_path+'/*.lifted.anchors')
-    synteny_protIDs = []
+    synteny_protIDs, synteny_protIDs2 = [], []
+    remaining_protIDs, remaining_synteny = [], []
     if synteny_files:
         for synteny_file in synteny_files:
             if synteny_file.endswith('.unout'):
@@ -653,38 +887,46 @@ def run_synteny_pipeline(query_prot_id,fasta_path,synteny_path,gff_path, bed_pat
                 q_protID, s_prot_ID = map(lambda x: synteny_file[x+1:x+4],coords)
             else:
                 q_protID, s_prot_ID = tuple(synteny_file[synteny_file.rfind('/')+1:].split('.')[:2])
-            if q_protID == query_protID: # fixme for now... in future, implement -global option so all sequences can be included
+            if q_protID == query_protID or query_protID == 'all': # fixme for now... in future, implement -global option so all sequences can be included
                 synteny_protIDs.append((q_protID, s_prot_ID))
+                synteny_protIDs2.extend([(q_protID, s_prot_ID),(s_protID, q_prot_ID)])
                 pairwise_synteny = PairwiseSynteny(genomes[q_protID],genomes[s_prot_ID],synteny_file,loci_threshold=loci_threshold)
                 pairwise_synteny.generate_synteny_structure(synteny_path)
                 pairwise_syntenies.append(pairwise_synteny)
-        if len(pairwise_syntenies) < len(intersect_keys)-1:
+
+        if len(pairwise_syntenies) < len(intersect_keys)-1 and query_protID != 'all':
             synteny_protIDs = set(np.array(synteny_protIDs)[:,1]).union({query_protID})
             remaining_protIDs = set(intersect_keys) - synteny_protIDs
+        elif query_protID == 'all':
+            remaining_synteny = set(list(combinations(intersect_keys,r=2))) - set(synteny_protIDs)
         else:
             remaining_protIDs = set()
     else:
-        remaining_protIDs = set(intersect_keys) - {query_protID}
+        if query_protID == 'all':
+            remaining_synteny = list(combinations(intersect_keys,r=2))
+        else:
+            remaining_protIDs = set(intersect_keys) - {query_protID}
 
 
-    if list(remaining_protIDs):
+    if list(remaining_protIDs) or remaining_synteny:
         def generate_CDS(protID):
             print(protID)
             genomes[protID].extract_CDS()
             return protID
         p = mp.ProcessingPool()
-        r = p.amap(generate_CDS,remaining_protIDs.union({query_protID}))
+        r = p.amap(generate_CDS,list(set(reduce(lambda x,y: list(x)+list(y),remaining_synteny))) if query_protID == 'all' else remaining_protIDs.union({query_protID}))
         r.wait()
         protIDs = r.get()
         #for protID in remaining_protIDs.union({query_protID}):
         #    genomes[protID].extract_CDS()
 
-        def p_synteny(s_prot_ID):
-            pairwise_synteny = PairwiseSynteny(genomes[query_protID],genomes[s_prot_ID],loci_threshold=loci_threshold)
+        def p_synteny(protIDs):
+            q_protID, s_prot_ID = protIDs
+            pairwise_synteny = PairwiseSynteny(genomes[q_protID],genomes[s_prot_ID],loci_threshold=loci_threshold)
             pairwise_synteny.generate_synteny_structure(synteny_path)
             return pairwise_synteny
 
-        r = p.amap(p_synteny,remaining_protIDs)#,callback=mycallback) # _async
+        r = p.amap(p_synteny,remaining_synteny if query_protID == 'all' else [(query_protID,s_prot_ID) for s_prot_ID in remaining_protIDs])#,callback=mycallback) # _async
         r.wait()
         pairwise_syntenies.extend(r.get())
         p.close()
@@ -804,12 +1046,22 @@ def circos_dropper(fasta_path, gff_path, synteny_path, bed_path, circos_inputs, 
         circos_obj.generate_config(ticks = circos_inputs+'/txticks.conf', ideogram = circos_inputs+'/txideogram.conf', links_and_rules = circos_inputs+'/linksAndrules.conf', config=circos_inputs+'/circos.conf')
         circos_obj.run_circos(circos_outputs+'/')
 
+#####################################
+#### PAIRWISE SEQUENCE ALIGNMENT ####
+
+@joshuatree.command()
+@click.option('-f1', default = './genome1.fa', show_default=True, help='Path containing fasta file one.', type=click.Path(exists=False))
+@click.option('-f2', default = './genome2.fa', show_default=True, help='Path containing fasta file two.', type=click.Path(exists=False))
+@click.option('-maf', '--out_file', default = './output.maf', show_default=True, help='Output in maf format.', type=click.Path(exists=False))
+def pairwise_alignment(f1,f2, out_file):
+    subprocess.call("samtools faidx %s && samtools faidx %s && lastz --format=maf %s %s > %s"%(f1,f2,f1,f2,out_file),shell=True)
+
 ####################
 #### RUN CACTUS ####
 
 @joshuatree.command()
 @click.option('-fo', '--fasta_output_path', default = './fasta_output/', show_default=True, help='Path containing all syntenic aligned regions, organized into fasta files for multiple sequence alignment via Cactus.', type=click.Path(exists=False))
-@click.option('-c', '--cactus_run_directory', default = './cactus_run/', show_default=True, help='Path containing all syntenic aligned regions, organized into fasta files for multiple sequence alignment via Cactus.', type=click.Path(exists=False))
+@click.option('-c', '--cactus_run_directory', default = './cactus_run/', show_default=True, help='Directory containing cactus run information.', type=click.Path(exists=False))
 #@click.option('-cac', '--cactus_softlink', default = './runProgressiveCactus.sh', show_default=True, help='Name of softlinked Progressive Cactus batch script file.', type=click.Path(exists=False))
 @click.option('-cac', '--cactus_softlink', default = './runProgressiveCactus/', show_default=True, help='Name of softlinked Progressive Cactus distribution.', type=click.Path(exists=False))
 #@click.option('-env', '--cactus_env_softlink', default = './cactus_environment', show_default=True, help='Name of softlinked Progressive Cactus virtual environment file.', type=click.Path(exists=False))
@@ -828,7 +1080,7 @@ def run_cactus(fasta_output_path,cactus_run_directory,cactus_softlink, n_cpus, h
 @joshuatree.command()
 @click.option('-cd', '--cactus_distribution_dir', default = './progressiveCactus/', show_default=True, help='Path containing installed Progressive Cactus Distribution.', type=click.Path(exists=False))
 #@click.option('-cac', '--softlink_cactus_name', default = './runProgressiveCactus.sh', show_default=True, help='Name of softlinked Progressive Cactus batch script file.', type=click.Path(exists=False))
-@click.option('-cac', '--softlink_cactus_name', default = './runProgressiveCactus/', show_default=True, help='Name of softlinked Progressive Cactus distribution.', type=click.Path(exists=False))
+@click.option('-cac', '--softlink_cactus_name', default = './runProgressiveCactus', show_default=True, help='Name of softlinked Progressive Cactus distribution.', type=click.Path(exists=False))
 #@click.option('-env', '--softlink_env_name', default = './cactus_environment', show_default=True, help='Name of softlinked Progressive Cactus virtual environment file.', type=click.Path(exists=False))
 @click.option('-h2m', '--softlink_hal2maf_name', default = './hal2maf', show_default=True, help='Name of softlinked Progressive Cactus hal2maf program.', type=click.Path(exists=False))
 def softlink_cactus(cactus_distribution_dir,softlink_cactus_name, softlink_hal2maf_name):
