@@ -19,8 +19,11 @@ process run_cactus{
     script:
     """
     cd ${work_dir}
+    set +u
     source ${environment}
+    set -u
     sh $cactus_run_files
+    deactivate
     """
 
 }

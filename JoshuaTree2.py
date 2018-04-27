@@ -393,7 +393,7 @@ class CactusRun:
         self.cactus_run_directory = cactus_run_directory +'/'
         self.cactus_output = self.cactus_run_directory+'output/'
         self.hal_path = self.cactus_output+'hal/'
-        self.cactus_softlink = os.path.abspath(cactus_softlink+'/bin/progressiveCactus.sh')
+        self.cactus_softlink = os.path.abspath(cactus_softlink+'/bin/runProgressiveCactus.sh')
         if not nickname_file:
             self.nickname_file = self.cactus_run_directory + 'prot_dict'
             self.protIDs = [fasta.split('_')[-2] for fasta in glob.glob(fasta_path+'/*.fa')+glob.glob(fasta_path+'/*.fasta')]
@@ -428,7 +428,7 @@ class CactusRun:
         run_file = os.path.abspath(self.seqfile+'.sh')
         self.run_files.append(run_file)
         with open(run_file,'w') as f:
-            f.write('#!/bin/bash\nexport _JAVA_OPTIONS="-Xmx155g"\n%s --maxThreads 16 %s %s %s >& %s\nscp %s %s'%(os.path.abspath(self.cactus_output),self.seqfile,self.fasta_run_dir,fasta.replace('.fasta','.hal'),self.seqfile+'.sh.stdout',fasta.replace('.fasta','.hal'),self.hal_path+fasta.split('/')[-1].replace('.fasta','.hal')))
+            f.write('#!/bin/bash\nexport _JAVA_OPTIONS="-Xmx155g"\n%s --maxThreads 16 %s %s %s >& %s\nscp %s %s'%(os.path.abspath(self.cactus_softlink),self.seqfile,self.fasta_run_dir,fasta.replace('.fasta','.hal'),self.seqfile+'.sh.stdout',fasta.replace('.fasta','.hal'),self.hal_path+fasta.split('/')[-1].replace('.fasta','.hal')))
         return run_file
 
     def write_fastas_seqfile(self):
@@ -446,7 +446,7 @@ class CactusRun:
     def run_cactus(self, submission = 'local'):
         with open('nextflow.config','w') as f:
             f.write('\n'.join(["process.%s = '%s'"%(i,j) for i,j in zip(['executor','memory', 'clusterOptions'],[submission,'155G', '' if submission != 'sge' else '-P plant-analysis.p -cwd -l h_rt=24:00:00 -pe pe_slots 16 -e OutputFile.txt'])]))
-        subprocess.call("nextflow cactus_run.nf --work_dir %s --cactus_run_files %s --environment %s"%(os.getcwd(),','.join(os.path.abspath(run_file) for run_file in self.run_files),os.path.abspath(self.cactus_env_softlink)),shell=True)
+        subprocess.call("export SHIFTER_RUNTIME='' && nextflow cactus_run.nf --work_dir %s --cactus_run_files %s --environment %s"%(os.getcwd(),','.join(os.path.abspath(run_file) for run_file in self.run_files),os.path.abspath(self.cactus_env_softlink)),shell=True)
         #for run_file in self.run_files:
         #    subprocess.call('nohup sh %s &'%(run_file),shell=True)
     # fixme, make sure to activate progressive cactus environment; sourcec environment in cactus folder, add hal2maf, send maf 2 cns analysis, parallelize and pipeline all scripts, maybe call nextflow from within python for each of the jobs for pipeline submission
