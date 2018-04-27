@@ -461,7 +461,7 @@ class CactusRun:
         constructor = DistanceTreeConstructor()
         dm = _DistanceMatrix(names=samples,matrix=[list(distance_matrix[i,0:i+1]) for i in range(len(samples))])
         tree = constructor.nj(dm)
-        Phylo.write(tree,self.fasta_run_dir+'output_tree.nh','newick')
+        Phylo.write(tree,self.fasta_run_dir+'output_tree.nh','newick') # fixme bug, tree being generated has negative branch lengths, this is why cactus is failing
 
     def hal2maf(self, n_cpus, hal2maf_softlink):
         self.hal2maf_softlink = hal2maf_softlink
@@ -643,6 +643,9 @@ class SNP:
     def __init__(self, snp_file, snp_format = 'vcf'):
         self.snp_file = snp_file
         self.format = snp_format
+        if snp_format == 'tab':
+            self.tab = self.snp_file
+            print("Warning: Do not use vcf manipulation methods.")
 
     def concat_vcf(self, vcf_out):
         if self.format == 'vcf':
@@ -721,7 +724,7 @@ class SNP:
         if tab_in:
             self.tab = tab_in
         if not list(df):
-            sample = int(sample)
+            sample = sample
             df = pd.read_table(self.tab,header=0)
             if sample:
                 df = df.sample(n=sample)
@@ -750,6 +753,25 @@ class SNP:
         subprocess.call("vcftools --vcf %s --remove-indels --recode --recode-INFO-all --out %s"%(self.snp_file,vcf_out),shell=True)
         return SNP(vcf_out)
 
+    def run_local_trees(self,snps_interval, phylogeny, work_dir):
+        vcf_file = os.path.abspath(self.snp_file)
+        tab_file = vcf_file.replace('.vcf','.tab')
+        work_dir = os.path.abspath(work_dir)+'/'
+        subprocess.call("export OPENBLAS_NUM_THREADS=1 && nextflow run local_trees.nf --vcf_file %s --tab_file %s --snps_interval %d --phylogeny %s --work_dir %s"%(vcf_file,tab_file,snps_interval,phylogeny,work_dir),shell=True)
+
+    def tab2chunks(self, tab_in, snp_intervals, write_file):
+        tab_df = pd.read_table(tab_in,header=0)
+        tab_df['[2]POS'] = tab_df['[2]POS'].as_matrix().astype(np.int)
+        tab_df = tab_df.sort_values(['# [1]CHROM','[2]POS'])
+        subprocess.call('rm %s'%write_file,shell=True)
+        for index, df in tab_df.groupby(np.arange(len(tab_df))//snp_intervals):
+            chroms = set(df['# [1]CHROM'])
+            if len(chroms) == 1:
+                interval_data = '_'.join([list(chroms)[0],str(np.min(df['[2]POS'])),str(np.max(df['[2]POS']))]) # fixme maybe try to do in parallel
+                self.tab2fasta('./%s.fa'%interval_data,0,'', df = df)
+                with open(write_file,'a') as f:
+                    f.write('\t'.join([interval_data,os.path.abspath('./%s.fa'%interval_data)])+'\n')
+
 class fasta_aln:
     def __init__(self, fasta):
         self.fasta = fasta
@@ -759,26 +781,26 @@ class fasta_aln:
         subprocess.call('snp-sites -m%s -o %s %s'%('b' if int(monomorphic) else '',fasta_out,self.fasta),shell=True)
         return SNP(vcf_out), fasta_aln(fasta_out)
 
-    def generate_tree(self, phylogeny, fasta_in, tree_out = './out.treefile', model='MF',bootstrap=1, n_threads = 'AUTO'):
+    def generate_tree(self, phylogeny, tree_out = './out.treefile', model='MF',bootstrap=1, n_threads = 'AUTO'):
         return_tree = 1
         if phylogeny == 'iqtree':
             iqtree_line = next(path for path in sys.path if 'conda/' in path and '/lib/' in path).split('/lib/')[0]+'/bin/ete3_apps/bin/iqtree'
-            subprocess.call('rm %s.ckp.gz'%fasta_in,shell=True)
-            subprocess.call(iqtree_line + ' -s %s -m %s -nt %s %s'%(fasta_in,model,n_threads,'-b %d'%int(bootstrap) if int(bootstrap) > 1 else ''), shell=True) #GTR
-            shutil.copy(fasta_in+'.treefile',tree_out)
+            subprocess.call('rm %s.ckp.gz'%self.fasta,shell=True)
+            subprocess.call(iqtree_line + ' -s %s -m %s -nt %s %s'%(self.fasta,model,n_threads,'-b %d'%int(bootstrap) if int(bootstrap) > 1 else ''), shell=True) #GTR
+            shutil.copy(self.fasta+'.treefile',tree_out)
         elif phylogeny == 'phyml':
-            phylip_in = fasta_in
+            phylip_in = self.fasta
             if not phylip_in.endswith('.phylip'):#phylip_in.endswith('.fasta') or phylip_in.endswith('.fa'): #FIXME can add biopython conversion
                 #subprocess.call(['perl', fasta2phylip, phylip_in, phylip_in.replace('fasta','phylip').replace('fa','phylip')])
-                phylip_in = fasta_in.replace('fasta','phylip').replace('fa','phylip')
-                AlignIO.convert(fasta_in,'fasta',phylip_in,'phylip-relaxed')
+                phylip_in = self.fasta.replace('fasta','phylip').replace('fa','phylip')
+                AlignIO.convert(self.fasta,'fasta',phylip_in,'phylip-relaxed')
             phymlLine = next(path for path in sys.path if 'conda/' in path and '/lib/' in path).split('/lib/')[0]+'/bin/ete3_apps/bin/phyml'
             subprocess.call([phymlLine, '-i', phylip_in, '-s', 'BEST', '-q', '-b', bootstrap, '-m', 'GTR'])
             if tree_out:
                 shutil.copy(phylip_in+'_phyml_tree.txt',tree_out)
         elif phylogeny == 'fasttree':
             fasttreeLine = next(path for path in sys.path if 'conda/' in path and '/lib/' in path).split('/lib/')[0]+'/bin/ete3_apps/bin/FastTree'
-            subprocess.call(fasttreeLine + ' -gtr -nt < ' + fasta_in + ' > ' + tree_out, shell=True)
+            subprocess.call(fasttreeLine + ' -gtr -nt < ' + self.fasta + ' > ' + tree_out, shell=True)
         else:
             print('Please select different phylogenetic analysis tool [iqtree|phyml|fasttree].')
             return_tree = 0
@@ -827,6 +849,10 @@ class TreeObj:
         for n in t.traverse():
             n.set_style(ns)
         t.render(output_image,tree_style = ts, dpi=300)
+
+    def write_trees_intervals(self, interval, out_file):
+        with open(self.treefile,'r') as f1, open(out_file,'w') as f2:
+            f2.write('\t'.join([interval,f1.read().strip('\n')]))
 
 
 
@@ -1091,7 +1117,7 @@ def softlink_cactus(cactus_distribution_dir,softlink_cactus_name, softlink_hal2m
     subprocess.call('ln -s %s %s'%(os.path.abspath(cactus_distribution_dir+'/submodules/hal/bin/hal2mafMP.py'),softlink_hal2maf_name),shell=True)
 
 @joshuatree.command()
-@click.option('-i','--install_path', help='Install Path.')
+@click.option('-i','--install_path', help='Install Path.', type=click.Path(exists=False))
 def install_cactus(install_path):
     """Install the Cactus distribution and hal tools.""" # fixme, make sure hal tools works
     os.chdir(install_path)
@@ -1106,9 +1132,43 @@ def install_cactus(install_path):
 ####################
 #### fixme add commands with snps and maf ####
 
+@joshuatree.command()
+@click.option('-vcf','--vcf_file', help='Input vcf file.', type=click.Path(exists=False))
+@click.option('-i','--snps_interval', default = 4000, show_default=True, help='How many snps to use per localized window.', type=click.Path(exists=False))
+@click.option('-phy','--phylogeny', default='iqtree', show_default=True, help='Phylogenetic analysis to use.', type=click.Choice(['iqtree','phyml','fasttree']))
+@click.option('-w','--work_dir', default = './', show_default = True, help='Work directory for local tree analysis.', type=click.Choice(['iqtree','phyml','fasttree']))
+def run_local_trees(vcf_file,snps_interval, phylogeny, work_dir):
+    snp = SNP(vcf_file)
+    snp.run_local_trees(snps_interval, phylogeny, work_dir)
 
+@joshuatree.command()
+@click.option('-vcf','--vcf_file', help='Input vcf file.', type=click.Path(exists=False))
+@click.option('-tab','--tab_file', default='out.tab', show_default=True, help='Output tab file.', type=click.Path(exists=False))
+def vcf2tab(vcf_file, tab_file):
+    snp = SNP(vcf_file)
+    snp.vcf2tab(tab_file)
 
+@joshuatree.command()
+@click.option('-tab','--tab_file', default='in.tab', show_default=True, help='Input tab file.', type=click.Path(exists=False))
+@click.option('-i','--snp_interval', default = 4000, show_default=True, help='How many snps to use per localized window.', type=click.Path(exists=False))
+@click.option('-o', '--write_file', default = './output.trees', show_default=True, help='File to write information on local fasta file chunks from local SNPs.',type=click.Path(exists=False))
+def tab2chunks(tab_file, snp_interval, write_file):
+    snp = SNP(tab_file,'tab')
+    snp.tab2chunks(tab_file,snp_interval, write_file)
 
+@joshuatree.command()
+@click.option('-f','--fasta_file', default='in.fasta', show_default=True, help='Input fasta file.', type=click.Path(exists=False))
+@click.option('-p','--phylogeny', default='iqtree', show_default=True, help='Phylogenetic analysis to use.', type=click.Choice(['iqtree','phyml','fasttree']))
+@click.option('-t','--tree_file', default = './out.treefile', show_default=True, help='Output tree file, newick format.', type=click.Path(exists=False))
+def generate_phylogeny(fasta_file, phylogeny, tree_file):
+    fasta = fasta_aln(fasta_aln)
+    fasta.generate_tree(phylogeny, tree_out = tree_file, model='GTR',bootstrap=1, n_threads = '1')
+
+@joshuatree.command()
+@click.option('-t','--tree_file', default = './in.treefile', show_default=True, help='Input tree file, newick format.', type=click.Path(exists=False))
+
+def write_trees_intervals(tree_file,interval, out_file)
+    TreeObj(tree_file).write_trees_intervals(interval, out_file)
 
 #### RUN CLI ####
 
