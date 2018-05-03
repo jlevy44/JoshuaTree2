@@ -18,6 +18,7 @@ from Bio import AlignIO
 from ete3 import PhyloTree, Tree,TreeStyle,NodeStyle,EvolTree
 import networkx as nx
 import matplotlib.pyplot as plt
+import pickle
 
 #################
 #### CLASSES ####
@@ -854,6 +855,55 @@ class TreeObj:
         with open(self.treefile,'r') as f1, open(out_file,'w') as f2:
             f2.write('\t'.join([interval,f1.read().strip('\n')]))
 
+    def local_trees2final_output(self,work_dir):
+        from collections import defaultdict
+        import seaborn as sns, matplotlib.pyplot as plt
+        from sklearn.manifold import MDS
+        import plotly.graph_objs as go
+        import plotly.offline as py
+        import dendropy
+        from dendropy.calculate import treecompare # ete3 calculates this distance as well
+        RFDistance = 1
+        work_dir += '/'
+        cluster_data = defaultdict(list)
+        tns = dendropy.TaxonNamespace()
+        for interval_data, tree in pd.read_table(self.treefile,header=None,dtype=str).as_matrix().tolist():
+                cluster_data[interval_data] = dendropy.Tree.get(data=tree,schema='newick',taxon_namespace=tns)
+                cluster_data[interval_data].encode_bipartitions()
+        cluster_keys = sorted(cluster_data.keys())
+        df = pd.DataFrame(np.nan, index=cluster_keys, columns=cluster_keys)
+        for i,j in list(combinations(cluster_keys,r=2)) + zip(cluster_keys,cluster_keys):
+            if i == j:
+                df.set_value(i,j,0)
+            if i != j:
+                if RFDistance:
+                    dissimilarity = treecompare.weighted_robinson_foulds_distance(cluster_data[i], cluster_data[j])
+                else:
+                    dissimilarity = np.linalg.norm(cluster_data[i]-cluster_data[j],None)
+                df.set_value(i,j,dissimilarity)
+                df.set_value(j,i,dissimilarity)
+        keys_df = pd.DataFrame(np.array([key.rsplit('_',2) for key in cluster_keys]))
+        keys_df[1] = keys_df[1].as_matrix().astype(np.int)
+        keys_df = keys_df.sort_values([0,1])
+        keys_df[1] = keys_df[1].as_matrix().astype(str)
+        new_keys = np.array(['_'.join(x) for x in keys_df.as_matrix()])
+        # FIXME sort by chromosome and position, integer... find a way, maybe feed to new dataframe and sort that way, break labels by _ and sort by [0,1] and not [2]
+        df = df.reindex(index=new_keys,columns=new_keys)
+        df.to_csv(work_dir+'dissimilarity_matrix_local_pca.csv')
+        if 0:
+            plt.figure()
+            sns.heatmap(df)
+            plt.savefig(work_dir+'dissimilarity_matrix_local_pca.png',dpi=300)
+        local_pca_dissimilarity = df.as_matrix()
+        local_pca_dissimilarity = np.nan_to_num(local_pca_dissimilarity)
+        mds = MDS(n_components=3,dissimilarity='precomputed')
+        transformed_data = mds.fit_transform(local_pca_dissimilarity)
+        np.save(work_dir+'local_pca_MDS_transform.npy',transformed_data)
+        pickle.dump(list(df.index.values),open(work_dir+'local_pca_window_names.p','wb'))
+        plots = []
+        plots.append(go.Scatter3d(x=transformed_data[:,0],y=transformed_data[:,1],z=transformed_data[:,2],text=list(df.index.values), mode='markers',marker=dict(color='blue', size=5),name='Regions'))
+        py.plot(go.Figure(data=plots),filename=work_dir+'Local_Topology_Differences.html',auto_open=False)
+
 
 
 
@@ -1132,11 +1182,23 @@ def install_cactus(install_path):
 ####################
 #### fixme add commands with snps and maf ####
 
+####################
+#### MAF Commands
+
+####################
+#### VCF Commands
+
+####################
+#### Tree Commands
+
+####################
+#### Local Tree Topology + Local PCA
+
 @joshuatree.command()
 @click.option('-vcf','--vcf_file', help='Input vcf file.', type=click.Path(exists=False))
 @click.option('-i','--snps_interval', default = 4000, show_default=True, help='How many snps to use per localized window.', type=click.Path(exists=False))
 @click.option('-phy','--phylogeny', default='iqtree', show_default=True, help='Phylogenetic analysis to use.', type=click.Choice(['iqtree','phyml','fasttree']))
-@click.option('-w','--work_dir', default = './', show_default = True, help='Work directory for local tree analysis.', type=click.Choice(['iqtree','phyml','fasttree']))
+@click.option('-w','--work_dir', default = './', show_default = True, help='Work directory for local tree analysis.', type=click.Path(exists=False))
 def run_local_trees(vcf_file,snps_interval, phylogeny, work_dir):
     snp = SNP(vcf_file)
     snp.run_local_trees(snps_interval, phylogeny, work_dir)
@@ -1166,9 +1228,17 @@ def generate_phylogeny(fasta_file, phylogeny, tree_file):
 
 @joshuatree.command()
 @click.option('-t','--tree_file', default = './in.treefile', show_default=True, help='Input tree file, newick format.', type=click.Path(exists=False))
-
-def write_trees_intervals(tree_file,interval, out_file)
+@click.option('-i','--interval', default = '', show_default=True, help='Bed interval of tree, delimited by underscore.', type=click.Path(exists=False))
+@click.option('-o','--out_file', default = 'out.interval', show_default=True, help='Output file containing interval and tree', type=click.Path(exists=False))
+def write_trees_intervals(tree_file,interval, out_file):
     TreeObj(tree_file).write_trees_intervals(interval, out_file)
+
+@joshuatree.command()
+@click.option('-t','--trees_file', default = './in.treesfile', show_default=True, help='Input trees file, containing intervals and trees.', type=click.Path(exists=False))
+@click.option('-w','--work_dir', default = './', show_default = True, help='Work directory for local tree analysis.', type=click.Path(exists=False))
+def local_trees2final_output(trees_file,work_dir):
+    TreeObj(trees_file).local_trees2final_output(work_dir)
+
 
 #### RUN CLI ####
 

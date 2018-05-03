@@ -1,6 +1,5 @@
 #!/usr/bin/env nextflow
 
-
 //////////////////////////////////////////////////////////////////////////////////
 // parsing functions
 
@@ -92,7 +91,7 @@ process write_trees2files {
         file write_file
 
     script:
-    """python ../../../CNS_commandline.py write_trees_intervals $interval $trees write_file"""
+    """python ../../../JoshuaTree2.py write_trees_intervals -i $interval -t $trees -o write_file"""
 
 }
 
@@ -108,6 +107,6 @@ process final_output {
     file local_trees
 
     script:
-    """python ../../../CNS_commandline.py local_trees2final_output $local_trees ${work_dir}"""
+    """python ../../../JoshuaTree2.py local_trees2final_output -t $local_trees -w ${work_dir}"""
 
     }
