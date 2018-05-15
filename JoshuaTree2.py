@@ -633,8 +633,6 @@ class MAF:
         vcf_obj.generate_new_header(vcf_out)
 
 
-
-
 ###################
 #### SNP CLASS #### fixme vcf or tab file, as well as df, can local pca, local tree, final tree (run iqtree), visualize tree, produce enw vcf files and interact with other snp objects
 # fixme maybe add nextflow class?
@@ -1130,6 +1128,7 @@ def circos_dropper(fasta_path, gff_path, synteny_path, bed_path, circos_inputs, 
 @click.option('-f2', default = './genome2.fa', show_default=True, help='Path containing fasta file two.', type=click.Path(exists=False))
 @click.option('-maf', '--out_file', default = './output.maf', show_default=True, help='Output in maf format.', type=click.Path(exists=False))
 def pairwise_alignment(f1,f2, out_file):
+    """Compute pairwise alignment between two genomes."""
     subprocess.call("samtools faidx %s && samtools faidx %s && lastz --format=maf %s %s > %s"%(f1,f2,f1,f2,out_file),shell=True)
 
 ####################
@@ -1244,7 +1243,3 @@ def local_trees2final_output(trees_file,work_dir):
 
 if __name__ == '__main__':
     joshuatree()
-
-"""'PAC2_0.316-PAC4GC.655_5.unout'
->>> sorted([(m.start(0),m.end(0)) for m in re.finditer('\PAC2_0|PAC4GC',unout)])
-[(0, 6), (11, 17)]"""
