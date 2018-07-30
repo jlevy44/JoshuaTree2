@@ -238,14 +238,14 @@ class Genome:
         self.fasta_file = fasta_file
         self.fasta = Fasta(fasta_file)
         self.gene_info = gene_info
-        self.bed_file = os.path.abspath(bed_file)
+        self.bed_file = bed_file#os.path.abspath(bed_file)
         self.short_name = self.bed_file.split('/')[-1].replace('.bed3','').replace('.bed','')
         self.protID = protID
-        self.CDS_file = self.bed_file.replace('.bed3','.cds').replace('.bed','.cds')
         self.gff_file = gff_file
-        if self.gff_file and os.path.exists(self.bed_file) == 0 or (os.path.exists(self.bed_file) and os.stat(self.bed_file).st_size == 0):
+        if self.gff_file and (os.path.exists(self.bed_file) == 0 or (os.path.exists(self.bed_file) and os.stat(self.bed_file).st_size == 0)):
             #click.echo('python -m jcvi.formats.gff bed --type=mRNA --key=%s %s > %s'%(self.gene_info,self.gff_file,self.bed_file))
-            subprocess.call('python -m jcvi.formats.gff bed --type=mRNA --key=%s %s -o %s'%(self.gene_info,self.gff_file,self.bed_file),shell=True)
+            #print('python -m jcvi.formats.gff bed %s --type=mRNA --key=%s -o %s'%(self.gff_file,self.gene_info,self.bed_file))
+            subprocess.call('python -m jcvi.formats.gff bed %s --type=mRNA --key=%s -o %s'%(self.gff_file,self.gene_info,self.bed_file),shell=True)#FIXME
             """
             with open(gff_file,'r') as f:
                 for header_line,line in enumerate(f):
@@ -260,6 +260,8 @@ class Genome:
 
             self.df = df
             """
+        self.bed_file = os.path.abspath(self.bed_file)
+        self.CDS_file = self.bed_file.replace('.bed3','.cds').replace('.bed','.cds')
         self.df = pd.read_table(self.bed_file,header=None,names=['chr','xi','xf','Gene'],dtype={'chr':str,'xi':np.int,'xf':np.int,'Gene':str},usecols=[0,1,2,3])
         self.df = self.df.set_index('Gene')
 
@@ -271,9 +273,15 @@ class Genome:
         if os.path.exists(self.CDS_file) == 0 or (os.path.exists(self.CDS_file) and os.stat(self.CDS_file).st_size == 0):
             subprocess.call('python -m jcvi.formats.gff load %s %s --parents=mRNA --children=CDS --id_attribute=%s -o %s'%(self.gff_file,self.fasta_file,self.gene_info,self.CDS_file),shell=True)
 
-    def export_karyotype(self, filename, n_chromosomes=25, shorten_chr=False):
+    def export_karyotype(self, filename, n_chromosomes=25, shorten_chr=False, chrom_file = ''):
         df = pd.read_table(self.fasta_file+'.fai', header=None,names=['chr','length'],usecols=[0,1],dtype=dict(zip(['chr','length'],[str,np.int])))
         df = df.sort_values(['length'],ascending=False)
+        if chrom_file:
+            with open(chrom_file) as f:
+                chromosomes = np.array(f.read().splitlines())
+            #print(df[np.isin(df['chr'].values,chromosomes)].set_index('chr'))
+
+            df = df[np.isin(df['chr'].values,chromosomes)].set_index('chr').reindex(chromosomes).reset_index().rename({'index':'chr'})[['chr','length']]
         if n_chromosomes < df.shape[0]:
             df = df.iloc[:n_chromosomes,:].reset_index(drop=True)
         out_txt = []
@@ -444,9 +452,9 @@ class CactusRun:
         self.run_files = r.get()
         p.close()
 
-    def run_cactus(self, submission = 'local'):
+    def run_cactus(self, submission = 'local', shifter = False):
         with open('nextflow.config','w') as f:
-            f.write('\n'.join(["process.%s = '%s'"%(i,j) for i,j in zip(['executor','memory', 'clusterOptions'],[submission,'155G', '' if submission != 'sge' else '-P plant-analysis.p -cwd -l h_rt=24:00:00 -pe pe_slots 16 -e OutputFile.txt'])]))
+            f.write('\n'.join(["process.%s = '%s'"%(i,j) for i,j in zip(['executor','memory', 'clusterOptions'],[submission,'155G', '' if submission != 'sge' else '-P plant-analysis.p -cwd -l h_rt=24:00:00 -pe pe_slots 16 -e OutputFile.txt'])]+(["shifter.enabled = true"] if shifter else ["docker.enabled = true"])+["process.container = 'lepbase/progressive-cactus:latest'"]))
         subprocess.call("export SHIFTER_RUNTIME='' && nextflow cactus_run.nf --work_dir %s --cactus_run_files %s --environment %s"%(os.getcwd(),','.join(os.path.abspath(run_file) for run_file in self.run_files),os.path.abspath(self.cactus_env_softlink)),shell=True)
         #for run_file in self.run_files:
         #    subprocess.call('nohup sh %s &'%(run_file),shell=True)
@@ -963,7 +971,7 @@ def run_synteny_pipeline(query_prot_id,fasta_path,synteny_path,gff_path, bed_pat
                 q_protID, s_prot_ID = tuple(synteny_file[synteny_file.rfind('/')+1:].split('.')[:2])
             if q_protID == query_protID or query_protID == 'all': # fixme for now... in future, implement -global option so all sequences can be included
                 synteny_protIDs.append((q_protID, s_prot_ID))
-                synteny_protIDs2.extend([(q_protID, s_prot_ID),(s_protID, q_prot_ID)])
+                synteny_protIDs2.extend([(q_protID, s_prot_ID),(s_prot_ID, q_protID)])
                 pairwise_synteny = PairwiseSynteny(genomes[q_protID],genomes[s_prot_ID],synteny_file,loci_threshold=loci_threshold)
                 pairwise_synteny.generate_synteny_structure(synteny_path)
                 pairwise_syntenies.append(pairwise_synteny)
@@ -1023,6 +1031,38 @@ def run_synteny_pipeline(query_prot_id,fasta_path,synteny_path,gff_path, bed_pat
 
 ####################
 #### RUN CIRCOS ####
+
+@joshuatree.command()
+@click.option('-f1', '--fasta_1', default = '1.fasta', show_default=True, help='Fasta file 1.', type=click.Path(exists=False))
+@click.option('-f2', '--fasta_2', default = '2.fasta', show_default=True, help='Fasta file 2.', type=click.Path(exists=False))
+@click.option('-g1', '--gff_1', default = '1.gff', show_default=True, help='GFF file 1.', type=click.Path(exists=False))
+@click.option('-g2', '--gff_2', default = '2.gff', show_default=True, help='GFF file 2.', type=click.Path(exists=False))
+@click.option('-link', '--link_file', default = '', show_default=True, help='Link file, either lifted anchors or unout.', type=click.Path(exists=False))
+@click.option('-chr1', '--chrom_file1', default = '', show_default=True, help='File listing chromosomes in new order for species 1.', type=click.Path(exists=False))
+@click.option('-chr2', '--chrom_file2', default = '', show_default=True, help='File listing chromosomes in new order for species 2.', type=click.Path(exists=False))
+@click.option('-info', '--gene_info', default = 'Name', show_default=True, help='Naming convention for gff file\'s gene name field.', type=click.Choice(['Name', 'gene_name']))
+@click.option('-l', '--loci_threshold', default= 4, show_default=True, help='Minimum number of genes in a syntenic block in order to include the block.')
+@click.option('-n', '--n_chromosomes', default= 25, show_default=True, help='Number of chromosomes in synteny.')
+@click.option('-w', '--work_dir', default = './', show_default=True, help='Working Directory.')
+def pairwise_circos(fasta_1, fasta_2, gff_1, gff_2, link_file, chrom_file1, chrom_file2, gene_info, loci_threshold, n_chromosomes, work_dir):
+    """Run pairwise circos in local directory."""
+    work_dir += '/'
+    genome1 = Genome(fasta_file=fasta_1, bed_file=work_dir+gff_1.split('.')[-2]+'.bed', protID=gff_1.split('.')[-2], gff_file=gff_1, gene_info=gene_info)
+    genome1.export_karyotype(work_dir+fasta_1[:fasta_1.rfind('.')]+'.karyotype.txt',n_chromosomes, chrom_file=chrom_file1)
+    genome2 = Genome(fasta_file=fasta_2, bed_file=work_dir+gff_2.split('.')[-2]+'.bed', protID=gff_2.split('.')[-2], gff_file=gff_2, gene_info=gene_info)
+    genome2.export_karyotype(work_dir+fasta_2[:fasta_2.rfind('.')]+'.karyotype.txt',n_chromosomes, chrom_file=chrom_file2)
+    if not link_file:
+        genome1.extract_CDS()
+        genome2.extract_CDS()
+    pairwise_synteny = PairwiseSynteny(genome1,genome2,link_file,loci_threshold=loci_threshold)
+    pairwise_synteny.generate_synteny_structure('./')
+    pairwise_synteny.synteny_structure_2_link(work_dir+'/%s.%s.link.txt'%(pairwise_synteny.q_genome.protID,pairwise_synteny.s_genome.protID))
+    circos_obj = Circos(pairwise_synteny)
+    circos_obj.generate_config(ticks = work_dir+'./txticks.conf', ideogram = work_dir+'/txideogram.conf', links_and_rules = work_dir+'/linksAndrules.conf', config=work_dir+'/circos.conf')
+    circos_obj.run_circos(work_dir)
+
+
+
 
 @joshuatree.command()
 @click.option('-fi', '--fasta_path', default = './fasta_path/', show_default=True, help='Fasta path containing all of the input genomes. Genome naming must conform to xxx_[protID]_xxx.[fa/fasta].', type=click.Path(exists=False))
@@ -1145,11 +1185,12 @@ def pairwise_alignment(f1,f2, out_file):
 @click.option('-h2m', '--nickname_file', default = '', show_default=True, help='File containing protID nickname in each line for all protIDs, can omit this file by leaving it blank.', type=click.Path(exists=False))
 @click.option('-fi', '--fasta_path', default = './fasta_path/', show_default=True, help='Fasta path containing all of the input genomes. Genome naming must conform to xxx_[protID]_xxx.[fa/fasta].', type=click.Path(exists=False))
 @click.option('-s', '--submission_system', default = 'local', show_default=True, help='Different nextflow submission system to use.', type=click.Choice(['local','sge','slurm']))
-def run_cactus(fasta_output_path,cactus_run_directory,cactus_softlink, n_cpus, hal2maf_softlink, nickname_file, fasta_path, submission_system): #fixme get rid of '' and add to command line tool
+@click.option('-shift', '--shifter', is_flag = True, help='Use shifter instead of docker.')
+def run_cactus(fasta_output_path,cactus_run_directory,cactus_softlink, n_cpus, hal2maf_softlink, nickname_file, fasta_path, submission_system, shifter): #fixme get rid of '' and add to command line tool
     """Run multiple sequence alignment via Progressive Cactus on multiple species synteny blocks and export as maf files. Try to run softlink_cactus beforehand, else use official cactus paths instead of softlinks."""
     cactus_run_obj = CactusRun(fasta_output_path,cactus_run_directory,cactus_softlink, nickname_file, fasta_path)
     cactus_run_obj.write_fastas_seqfile()
-    cactus_run_obj.run_cactus(submission_system)
+    cactus_run_obj.run_cactus(submission_system, shifter=shifter)
     cactus_run_obj.hal2maf(n_cpus, hal2maf_softlink)
 
 @joshuatree.command()
@@ -1222,7 +1263,7 @@ def tab2chunks(tab_file, snp_interval, write_file):
 @click.option('-p','--phylogeny', default='iqtree', show_default=True, help='Phylogenetic analysis to use.', type=click.Choice(['iqtree','phyml','fasttree']))
 @click.option('-t','--tree_file', default = './out.treefile', show_default=True, help='Output tree file, newick format.', type=click.Path(exists=False))
 def generate_phylogeny(fasta_file, phylogeny, tree_file):
-    fasta = fasta_aln(fasta_aln)
+    fasta = fasta_aln(fasta_file)
     fasta.generate_tree(phylogeny, tree_out = tree_file, model='GTR',bootstrap=1, n_threads = '1')
 
 @joshuatree.command()
@@ -1237,6 +1278,7 @@ def write_trees_intervals(tree_file,interval, out_file):
 @click.option('-w','--work_dir', default = './', show_default = True, help='Work directory for local tree analysis.', type=click.Path(exists=False))
 def local_trees2final_output(trees_file,work_dir):
     TreeObj(trees_file).local_trees2final_output(work_dir)
+
 
 
 #### RUN CLI ####
