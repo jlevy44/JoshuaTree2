@@ -219,11 +219,14 @@ class PairwiseSynteny:
     def synteny_structure_2_bed(self,filename):
         self.synteny_structure.to_csv(filename,sep='\t',index=False,header=None)
 
-    def synteny_structure_2_link(self, filename):
+    def synteny_structure_2_link(self, filename, bundle_links = False, link_gap = 10000):
         df = self.synteny_structure
         df['q_chr'] = np.vectorize(lambda x: self.q_genome.protID+'-'+x)(df['q_chr'])
         df['s_chr'] = np.vectorize(lambda x: self.s_genome.protID+'-'+x)(df['s_chr'])
         df.to_csv(filename,sep=' ',index=False,header=None)
+        if bundle_links:
+            click.echo("./helper_scripts/circos-tools-0.22/tools/bundlelinks/bin/bundlelinks -max_gap {0} -links {1} > {1}.temp && cut -f 1-6 -d " " {1}.temp > {1} && rm {1}.temp".format(str(link_gap), filename))
+            subprocess.call("./helper_scripts/circos-tools-0.22/tools/bundlelinks/bin/bundlelinks -max_gap {0} -links {1} > {1}.temp && cut -f 1-6 -d \" \" {1}.temp > {1} && rm {1}.temp".format(str(link_gap), filename), shell=True)
         self.link = os.path.abspath(filename)
 
     def export_karyotypes(self,circos_input):
@@ -276,9 +279,16 @@ class Genome:
     def export_karyotype(self, filename, n_chromosomes=25, shorten_chr=False, chrom_file = ''):
         df = pd.read_table(self.fasta_file+'.fai', header=None,names=['chr','length'],usecols=[0,1],dtype=dict(zip(['chr','length'],[str,np.int])))
         df = df.sort_values(['length'],ascending=False)
+        chromosomes_names_dict = {}
         if chrom_file:
             with open(chrom_file) as f:
-                chromosomes = np.array(f.read().splitlines())
+                chromosomes = f.read().splitlines()
+            if len(chromosomes[0].split()) == 2:
+                chr_tuples = map(lambda l: tuple(l.split()), chromosomes)
+                chromosomes_names_dict = dict(chr_tuples)
+                chromosomes = np.array(chr_tuples)[:,0]
+            else:
+                chromosomes = np.array(chromosomes)
             #print(df[np.isin(df['chr'].values,chromosomes)].set_index('chr'))
 
             df = df[np.isin(df['chr'].values,chromosomes)].set_index('chr').reindex(chromosomes).reset_index().rename({'index':'chr'})[['chr','length']]
@@ -287,7 +297,7 @@ class Genome:
         out_txt = []
         for i in range(df.shape[0]):
             chrom = df.loc[i,'chr']
-            chr_name = chrom if not shorten_chr else chrom[0] + chrom.split('_')[-1]
+            chr_name = (chromosomes_names_dict[chrom] if chromosomes_names_dict else chrom) if not shorten_chr else chrom[0] + chrom.split('_')[-1]
             if i >= 25:
                 out_txt.append('chr - %s-%s %s 0 %d %d,%d,%d\n'%(self.protID,chrom,chr_name,df.loc[i,'length'],randint(1,255),randint(1,255),randint(1,255)))
             else:
@@ -350,7 +360,7 @@ class Circos:
         self.ticks = filename
         return filename
 
-    def generate_config(self, ticks = 'txticks.conf', ideogram = 'txideogram.conf', links_and_rules = 'linksAndrules.conf', config='circos.conf'):
+    def generate_config(self, ticks = 'txticks.conf', ideogram = 'txideogram.conf', links_and_rules = 'linksAndrules.conf', config='circos.conf', variable_thickness = False, thickness_factor=1000):
         colors = pd.read_table(self.synteny.s_genome.karyotype,header=None,usecols=[2,6],sep=' ').as_matrix()
         self.links_and_rules = links_and_rules
         self.config = config
@@ -380,13 +390,14 @@ class Circos:
                 file = %s
                 radius = 0.99r
                 bezier_radius = 0r
+                %s
                 ribbon = yes
                 color = black_a4
                 <rules>
                 <rule>
                 condition = var(intrachr)
                 show = no
-                </rule>\n"""%(self.synteny.link) + '\n'.join(['<rule>\ncondition = to(%s)\ncolor = %s\n</rule>'%(chrom,color) for chrom,color in map(tuple,colors)]) + '\n</rules>\n</link>\n</links>')
+                </rule>\n"""%(self.synteny.link, 'thickness = eval(max(1,round(var(size1)/%d)))'%thickness_factor if variable_thickness else '') + '\n'.join(['<rule>\ncondition = to(%s)\ncolor = %s\n</rule>'%(chrom,color) for chrom,color in map(tuple,colors)]) + '\n</rules>\n</link>\n</links>')
 
     def run_circos(self, output_dir='./', pdf=False):
         subprocess.call('circos -conf %s -outputfile %s-%s -outputdir %s'%(self.config,self.synteny.q_genome.protID,self.synteny.s_genome.protID,output_dir),shell=True)
@@ -540,7 +551,7 @@ class MAF_filter_config:
             f.write(self.config_txt)
 
     def run_maffilter(self):
-        subprocess.call('./maffilter param=%s'%self.config_file,shell=True)
+        subprocess.call('./helper_scripts/maffilter param=%s'%self.config_file,shell=True)
 
 
 class MAF:
@@ -610,7 +621,7 @@ class MAF:
         self.maf_file_new_coords = changed_coordinates_file
 
     def strand(self, reference_species):
-        subprocess.call('./mafStrander -m %s --seq %s > temp.maf'%(self.maf_file,reference_species),shell=True)
+        subprocess.call('./helper_scripts/mafStrander -m %s --seq %s > temp.maf'%(self.maf_file,reference_species),shell=True)
         subprocess.call('mv temp.maf %s'%self.maf_file)
 
     def maf2vcf(self, maf_filter_config, species, reference_species, reference_species_fai, vcf_out, change_coordinates = True):
@@ -1038,13 +1049,17 @@ def run_synteny_pipeline(query_prot_id,fasta_path,synteny_path,gff_path, bed_pat
 @click.option('-g1', '--gff_1', default = '1.gff', show_default=True, help='GFF file 1.', type=click.Path(exists=False))
 @click.option('-g2', '--gff_2', default = '2.gff', show_default=True, help='GFF file 2.', type=click.Path(exists=False))
 @click.option('-link', '--link_file', default = '', show_default=True, help='Link file, either lifted anchors or unout.', type=click.Path(exists=False))
-@click.option('-chr1', '--chrom_file1', default = '', show_default=True, help='File listing chromosomes in new order for species 1.', type=click.Path(exists=False))
-@click.option('-chr2', '--chrom_file2', default = '', show_default=True, help='File listing chromosomes in new order for species 2.', type=click.Path(exists=False))
+@click.option('-chr1', '--chrom_file1', default = '', show_default=True, help='File listing chromosomes in new order for species 1, can change names of all chromosomes via space delimiting in each line: old_chr_name new_chr_name.', type=click.Path(exists=False))
+@click.option('-chr2', '--chrom_file2', default = '', show_default=True, help='File listing chromosomes in new order for species 2, can change names of all chromosomes via space delimiting in each line: old_chr_name new_chr_name.', type=click.Path(exists=False))
 @click.option('-info', '--gene_info', default = 'Name', show_default=True, help='Naming convention for gff file\'s gene name field.', type=click.Choice(['Name', 'gene_name']))
 @click.option('-l', '--loci_threshold', default= 4, show_default=True, help='Minimum number of genes in a syntenic block in order to include the block.')
 @click.option('-n', '--n_chromosomes', default= 25, show_default=True, help='Number of chromosomes in synteny.')
 @click.option('-w', '--work_dir', default = './', show_default=True, help='Working Directory.')
-def pairwise_circos(fasta_1, fasta_2, gff_1, gff_2, link_file, chrom_file1, chrom_file2, gene_info, loci_threshold, n_chromosomes, work_dir):
+@click.option('-v', '--variable_thickness', is_flag=True, help="Variable thickness for the links.")
+@click.option('-t', '--thickness_factor', default=1000, show_default=True, help="If variable, thickness of link is length of link divided by factor.")
+@click.option('-b', '--bundle_links', is_flag=True, help="Bundle closely spaced links.")
+@click.option('-g', '--link_gap', default=10000, show_default=True, help="Gap between closely spaced links.")
+def pairwise_circos(fasta_1, fasta_2, gff_1, gff_2, link_file, chrom_file1, chrom_file2, gene_info, loci_threshold, n_chromosomes, work_dir, variable_thickness, thickness_factor, bundle_links, link_gap):
     """Run pairwise circos in local directory."""
     work_dir += '/'
     genome1 = Genome(fasta_file=fasta_1, bed_file=work_dir+gff_1.split('.')[-2]+'.bed', protID=gff_1.split('.')[-2], gff_file=gff_1, gene_info=gene_info)
@@ -1056,9 +1071,9 @@ def pairwise_circos(fasta_1, fasta_2, gff_1, gff_2, link_file, chrom_file1, chro
         genome2.extract_CDS()
     pairwise_synteny = PairwiseSynteny(genome1,genome2,link_file,loci_threshold=loci_threshold)
     pairwise_synteny.generate_synteny_structure('./')
-    pairwise_synteny.synteny_structure_2_link(work_dir+'/%s.%s.link.txt'%(pairwise_synteny.q_genome.protID,pairwise_synteny.s_genome.protID))
+    pairwise_synteny.synteny_structure_2_link(work_dir+'/%s.%s.link.txt'%(pairwise_synteny.q_genome.protID,pairwise_synteny.s_genome.protID), bundle_links = bundle_links, link_gap = link_gap)
     circos_obj = Circos(pairwise_synteny)
-    circos_obj.generate_config(ticks = work_dir+'./txticks.conf', ideogram = work_dir+'/txideogram.conf', links_and_rules = work_dir+'/linksAndrules.conf', config=work_dir+'/circos.conf')
+    circos_obj.generate_config(ticks = work_dir+'./txticks.conf', ideogram = work_dir+'/txideogram.conf', links_and_rules = work_dir+'/linksAndrules.conf', config=work_dir+'/circos.conf', variable_thickness=variable_thickness, thickness_factor=thickness_factor)
     circos_obj.run_circos(work_dir)
 
 @joshuatree.command()
