@@ -151,6 +151,7 @@ class PairwiseSynteny:
         self.q_genome = q_genome
         self.s_genome = s_genome
         self.loci_threshold = loci_threshold
+        self.chrom_colors = {}
 
     def generate_synteny_structure(self,synteny_path):
         """Take anchor file or synteny file and searches for starting and ending genes for each syntenic block"""
@@ -220,13 +221,22 @@ class PairwiseSynteny:
         self.synteny_structure.to_csv(filename,sep='\t',index=False,header=None)
 
     def synteny_structure_2_link(self, filename, bundle_links = False, link_gap = 10000):
+        self.chrom_colors = dict(self.q_genome.chrom_colors,**self.s_genome.chrom_colors)
+        click.echo(str(self.chrom_colors))
         df = self.synteny_structure
         df['q_chr'] = np.vectorize(lambda x: self.q_genome.protID+'-'+x)(df['q_chr'])
         df['s_chr'] = np.vectorize(lambda x: self.s_genome.protID+'-'+x)(df['s_chr'])
+        if 0:
+            df = df[['s_chr','s_xi','s_xf','q_chr','q_xi','q_xf']]
         df.to_csv(filename,sep=' ',index=False,header=None)
         if bundle_links:
             click.echo("./helper_scripts/circos-tools-0.22/tools/bundlelinks/bin/bundlelinks -max_gap {0} -links {1} > {1}.temp && cut -f 1-6 -d " " {1}.temp > {1} && rm {1}.temp".format(str(link_gap), filename))
             subprocess.call("./helper_scripts/circos-tools-0.22/tools/bundlelinks/bin/bundlelinks -max_gap {0} -links {1} > {1}.temp && cut -f 1-6 -d \" \" {1}.temp > {1} && rm {1}.temp".format(str(link_gap), filename), shell=True)
+        if 0:
+            df = pd.read_table(filename ,sep = ' ', header = None, names = ['q_chr','q_xi','q_xf','s_chr','s_xi','s_xf'])
+            df['color'] = np.vectorize(lambda x: 'color=%s'%(self.chrom_colors[x]))(df['q_chr'])
+            print(df)
+            df.to_csv(filename, sep=' ', index=False, header=None)
         self.link = os.path.abspath(filename)
 
     def export_karyotypes(self,circos_input):
@@ -245,6 +255,7 @@ class Genome:
         self.short_name = self.bed_file.split('/')[-1].replace('.bed3','').replace('.bed','')
         self.protID = protID
         self.gff_file = gff_file
+        self.chrom_colors = {}
         if self.gff_file and (os.path.exists(self.bed_file) == 0 or (os.path.exists(self.bed_file) and os.stat(self.bed_file).st_size == 0)):
             #click.echo('python -m jcvi.formats.gff bed --type=mRNA --key=%s %s > %s'%(self.gene_info,self.gff_file,self.bed_file))
             #print('python -m jcvi.formats.gff bed %s --type=mRNA --key=%s -o %s'%(self.gff_file,self.gene_info,self.bed_file))
@@ -299,9 +310,11 @@ class Genome:
             chrom = df.loc[i,'chr']
             chr_name = (chromosomes_names_dict[chrom] if chromosomes_names_dict else chrom) if not shorten_chr else chrom[0] + chrom.split('_')[-1]
             if i >= 25:
-                out_txt.append('chr - %s-%s %s 0 %d %d,%d,%d\n'%(self.protID,chrom,chr_name,df.loc[i,'length'],randint(1,255),randint(1,255),randint(1,255)))
+                color = '%d,%d,%d'%(randint(1,255),randint(1,255),randint(1,255))
             else:
-                out_txt.append('chr - %s-%s %s 0 %d chr%d\n'%(self.protID,chrom,chr_name,df.loc[i,'length'],i+1))
+                color = 'chr%d'%(i+1)
+            out_txt.append('chr - %s-%s %s 0 %d %s\n'%(self.protID,chrom,chr_name,df.loc[i,'length'],color))
+            self.chrom_colors['%s-%s'%(self.protID,chrom)] = color
         with open(filename,'w') as f:
             f.writelines(out_txt)
         self.karyotype = os.path.abspath(filename)
@@ -360,8 +373,8 @@ class Circos:
         self.ticks = filename
         return filename
 
-    def generate_config(self, ticks = 'txticks.conf', ideogram = 'txideogram.conf', links_and_rules = 'linksAndrules.conf', config='circos.conf', variable_thickness = False, thickness_factor=1000):
-        colors = pd.read_table(self.synteny.s_genome.karyotype,header=None,usecols=[2,6],sep=' ').as_matrix()
+    def generate_config(self, ticks = 'txticks.conf', ideogram = 'txideogram.conf', links_and_rules = 'linksAndrules.conf', config='circos.conf', variable_thickness = False, thickness_factor=1000, switch_lines = False):
+        colors = pd.read_table(self.synteny.s_genome.karyotype if not switch_lines else self.synteny.q_genome.karyotype,header=None,usecols=[2,6],sep=' ').as_matrix()
         self.links_and_rules = links_and_rules
         self.config = config
         self.ideogram,self.ticks = ideogram, ticks
@@ -382,7 +395,7 @@ class Circos:
                 </image>
                 <<include etc/colors_fonts_patterns.conf>>
                 <<include etc/housekeeping.conf>>
-                """%(self.synteny.q_genome.karyotype,self.synteny.s_genome.karyotype,self.ideogram,self.ticks,self.links_and_rules))
+                """%(self.synteny.q_genome.karyotype , self.synteny.s_genome.karyotype, self.ideogram,self.ticks,self.links_and_rules))
         with open(self.links_and_rules,'w') as f:
             f.write("""
                 <links>
@@ -392,12 +405,12 @@ class Circos:
                 bezier_radius = 0r
                 %s
                 ribbon = yes
-                color = black_a4
+                color = black
                 <rules>
                 <rule>
                 condition = var(intrachr)
                 show = no
-                </rule>\n"""%(self.synteny.link, 'thickness = eval(max(1,round(var(size1)/%d)))'%thickness_factor if variable_thickness else '') + '\n'.join(['<rule>\ncondition = to(%s)\ncolor = %s\n</rule>'%(chrom,color) for chrom,color in map(tuple,colors)]) + '\n</rules>\n</link>\n</links>')
+                </rule>\n"""%(self.synteny.link, 'thickness = eval(max(1,round(var(size1)/%d)))'%thickness_factor if variable_thickness else '') + '\n'.join(['<rule>\ncondition = %s(%s)\ncolor = %s\n</rule>'%('from' if switch_lines else 'to',chrom,color) for chrom,color in (self.synteny.q_genome.chrom_colors.items() if switch_lines else self.synteny.s_genome.chrom_colors.items())]) + '\n</rules>\n</link>\n</links>') # map(tuple,colors)
 
     def run_circos(self, output_dir='./', pdf=False):
         subprocess.call('circos -conf %s -outputfile %s-%s -outputdir %s'%(self.config,self.synteny.q_genome.protID,self.synteny.s_genome.protID,output_dir),shell=True)
@@ -1059,7 +1072,8 @@ def run_synteny_pipeline(query_prot_id,fasta_path,synteny_path,gff_path, bed_pat
 @click.option('-t', '--thickness_factor', default=1000, show_default=True, help="If variable, thickness of link is length of link divided by factor.")
 @click.option('-b', '--bundle_links', is_flag=True, help="Bundle closely spaced links.")
 @click.option('-g', '--link_gap', default=10000, show_default=True, help="Gap between closely spaced links.")
-def pairwise_circos(fasta_1, fasta_2, gff_1, gff_2, link_file, chrom_file1, chrom_file2, gene_info, loci_threshold, n_chromosomes, work_dir, variable_thickness, thickness_factor, bundle_links, link_gap):
+@click.option('-s', '--switch_lines', is_flag=True, help="Switch reference and query lines for circos production.")
+def pairwise_circos(fasta_1, fasta_2, gff_1, gff_2, link_file, chrom_file1, chrom_file2, gene_info, loci_threshold, n_chromosomes, work_dir, variable_thickness, thickness_factor, bundle_links, link_gap, switch_lines):
     """Run pairwise circos in local directory."""
     work_dir += '/'
     genome1 = Genome(fasta_file=fasta_1, bed_file=work_dir+gff_1.split('.')[-2]+'.bed', protID=gff_1.split('.')[-2], gff_file=gff_1, gene_info=gene_info)
@@ -1073,7 +1087,7 @@ def pairwise_circos(fasta_1, fasta_2, gff_1, gff_2, link_file, chrom_file1, chro
     pairwise_synteny.generate_synteny_structure('./')
     pairwise_synteny.synteny_structure_2_link(work_dir+'/%s.%s.link.txt'%(pairwise_synteny.q_genome.protID,pairwise_synteny.s_genome.protID), bundle_links = bundle_links, link_gap = link_gap)
     circos_obj = Circos(pairwise_synteny)
-    circos_obj.generate_config(ticks = work_dir+'./txticks.conf', ideogram = work_dir+'/txideogram.conf', links_and_rules = work_dir+'/linksAndrules.conf', config=work_dir+'/circos.conf', variable_thickness=variable_thickness, thickness_factor=thickness_factor)
+    circos_obj.generate_config(ticks = work_dir+'./txticks.conf', ideogram = work_dir+'/txideogram.conf', links_and_rules = work_dir+'/linksAndrules.conf', config=work_dir+'/circos.conf', variable_thickness=variable_thickness, thickness_factor=thickness_factor, switch_lines=switch_lines)
     circos_obj.run_circos(work_dir)
 
 @joshuatree.command()
