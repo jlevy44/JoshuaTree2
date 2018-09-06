@@ -218,7 +218,10 @@ class PairwiseSynteny:
         self.synteny_structure = pd.DataFrame(synteny_structure,columns=['q_chr','q_xi','q_xf','s_chr','s_xi','s_xf']).astype(str)
 
     def synteny_structure_2_bed(self,filename):
-        self.synteny_structure.to_csv(filename,sep='\t',index=False,header=None)
+        df = self.synteny_structure
+        df['q_chr'] = np.vectorize(lambda x: self.q_genome.protID+'-'+x)(df['q_chr'])
+        df['s_chr'] = np.vectorize(lambda x: self.s_genome.protID+'-'+x)(df['s_chr'])
+        df.to_csv(filename,sep='\t',index=False,header=None)
 
     def synteny_structure_2_link(self, filename, bundle_links = False, link_gap = 10000):
         self.chrom_colors = dict(self.q_genome.chrom_colors,**self.s_genome.chrom_colors)
@@ -1052,6 +1055,27 @@ def run_synteny_pipeline(query_prot_id,fasta_path,synteny_path,gff_path, bed_pat
 
     super_synteny = SuperSynteny(pairwise_syntenies, bps_threshold, genomes[query_protID])
     super_synteny.generate_global_synteny_graph(fasta_out_dir)
+
+@joshuatree.command()
+@click.option('-f1', '--fasta_1', default = '1.fasta', show_default=True, help='Fasta file 1.', type=click.Path(exists=False))
+@click.option('-f2', '--fasta_2', default = '2.fasta', show_default=True, help='Fasta file 2.', type=click.Path(exists=False))
+@click.option('-g1', '--gff_1', default = '1.gff', show_default=True, help='GFF file 1.', type=click.Path(exists=False))
+@click.option('-g2', '--gff_2', default = '2.gff', show_default=True, help='GFF file 2.', type=click.Path(exists=False))
+@click.option('-link', '--link_file', default = '', show_default=True, help='Link file, either lifted anchors or unout.', type=click.Path(exists=False))
+@click.option('-info', '--gene_info', default = 'Name', show_default=True, help='Naming convention for gff file\'s gene name field.', type=click.Choice(['Name', 'gene_name']))
+@click.option('-l', '--loci_threshold', default= 4, show_default=True, help='Minimum number of genes in a syntenic block in order to include the block.')
+@click.option('-w', '--work_dir', default = './', show_default=True, help='Working Directory.')
+def extract_syntenic_blocks(fasta_1, fasta_2, gff_1, gff_2, link_file, gene_info, loci_threshold, work_dir):
+    """Run pairwise circos in local directory."""
+    work_dir += '/'
+    genome1 = Genome(fasta_file=fasta_1, bed_file=work_dir+gff_1.split('.')[-2]+'.bed', protID=gff_1.split('.')[-2], gff_file=gff_1, gene_info=gene_info)
+    genome2 = Genome(fasta_file=fasta_2, bed_file=work_dir+gff_2.split('.')[-2]+'.bed', protID=gff_2.split('.')[-2], gff_file=gff_2, gene_info=gene_info)
+    if not link_file:
+        genome1.extract_CDS()
+        genome2.extract_CDS()
+    pairwise_synteny = PairwiseSynteny(genome1,genome2,link_file,loci_threshold=loci_threshold)
+    pairwise_synteny.generate_synteny_structure('./')
+    pairwise_synteny.synteny_structure_2_bed(work_dir+'/%s.%s.synteny.bed'%(pairwise_synteny.q_genome.protID,pairwise_synteny.s_genome.protID))
 
 ####################
 #### RUN CIRCOS ####
