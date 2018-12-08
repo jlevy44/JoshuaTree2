@@ -1081,6 +1081,32 @@ def extract_syntenic_blocks(fasta_1, fasta_2, gff_1, gff_2, link_file, gene_info
 #### RUN CIRCOS ####
 
 @joshuatree.command()
+@click.option('-fi', '--fasta_path', default = './fasta_path/', show_default=True, help='Fasta path containing all of the input genomes. Genome naming must conform to xxx_[protID]_xxx.[fa/fasta].', type=click.Path(exists=False))
+@click.option('-gff', '--gff_path', default = './gff_path/', show_default=True, help='Gff path containing all of the gff/gff3 files. Gff naming must conform to: xxx.[protID].[gff/gff3].', type=click.Path(exists=False))
+@click.option('-l', '--loci_threshold', default= 4, show_default=True, help='Minimum number of genes in a syntenic block in order to include the block.')
+@click.option('-n', '--n_chromosomes', default= 25, show_default=True, help='Number of chromosomes in synteny.')
+@click.option('-w', '--work_dir', default = './', show_default=True, help='Working Directory.')
+@click.option('-v', '--variable_thickness', is_flag=True, help="Variable thickness for the links.")
+@click.option('-t', '--thickness_factor', default=1000, show_default=True, help="If variable, thickness of link is length of link divided by factor.")
+@click.option('-b', '--bundle_links', is_flag=True, help="Bundle closely spaced links.")
+@click.option('-g', '--link_gap', default=10000, show_default=True, help="Gap between closely spaced links.")
+def pairwise_circos_links(fasta_path,gff_path,loci_threshold,n_chromosomes,work_dir,variable_thickness,thickness_factor,bundle_links,link_gap):
+    fasta_files = {fasta.split('_')[-2] : fasta for fasta in glob.glob(fasta_path+'/*.fa')+glob.glob(fasta_path+'/*.fasta')}
+    gff_files = {gff.split('.')[-2] : gff for gff in glob.glob(gff_path+'/*.gff')+glob.glob(gff_path+'/*.gff3') }
+    intersect_keys = set(fasta_files.keys()) & set(gff_files.keys())
+    fasta_files = {protID:fasta for protID,fasta in fasta_files.items() if protID in intersect_keys}
+    gff_files = {protID:gff for protID,gff in gff_files.items() if protID in intersect_keys}
+    for p1,p2 in list(combinations(intersect_keys,r=2)):
+        opts={'-f1':fasta_files[p1],'-f2':fasta_files[p2],'-g1':gff_files[p1],'-g2':gff_files[p2],'-l':loci_threshold,'-n':n_chromosomes,'-w':work_dir,'-t':thickness_factor,'-g':link_gap}
+        if bundle_links:
+            opts['-b']=''
+        if variable_thickness:
+            opts['-v']=''
+        command='python JoshuaTree2.py pairwise_circos -o {0}'.format(' '.join('{0} {1}'.format(k,v) for k,v in opts.items()))
+        subprocess.call(command,shell=True)
+
+
+@joshuatree.command()
 @click.option('-f1', '--fasta_1', default = '1.fasta', show_default=True, help='Fasta file 1.', type=click.Path(exists=False))
 @click.option('-f2', '--fasta_2', default = '2.fasta', show_default=True, help='Fasta file 2.', type=click.Path(exists=False))
 @click.option('-g1', '--gff_1', default = '1.gff', show_default=True, help='GFF file 1.', type=click.Path(exists=False))
@@ -1097,7 +1123,8 @@ def extract_syntenic_blocks(fasta_1, fasta_2, gff_1, gff_2, link_file, gene_info
 @click.option('-b', '--bundle_links', is_flag=True, help="Bundle closely spaced links.")
 @click.option('-g', '--link_gap', default=10000, show_default=True, help="Gap between closely spaced links.")
 @click.option('-s', '--switch_lines', is_flag=True, help="Switch reference and query lines for circos production.")
-def pairwise_circos(fasta_1, fasta_2, gff_1, gff_2, link_file, chrom_file1, chrom_file2, gene_info, loci_threshold, n_chromosomes, work_dir, variable_thickness, thickness_factor, bundle_links, link_gap, switch_lines):
+@click.option('-o', '--no_output_circos', is_flag=True, help="No output circos.")
+def pairwise_circos(fasta_1, fasta_2, gff_1, gff_2, link_file, chrom_file1, chrom_file2, gene_info, loci_threshold, n_chromosomes, work_dir, variable_thickness, thickness_factor, bundle_links, link_gap, switch_lines, no_output_circos):
     """Run pairwise circos in local directory."""
     work_dir += '/'
     genome1 = Genome(fasta_file=fasta_1, bed_file=work_dir+gff_1.split('.')[-2]+'.bed', protID=gff_1.split('.')[-2], gff_file=gff_1, gene_info=gene_info)
@@ -1110,9 +1137,10 @@ def pairwise_circos(fasta_1, fasta_2, gff_1, gff_2, link_file, chrom_file1, chro
     pairwise_synteny = PairwiseSynteny(genome1,genome2,link_file,loci_threshold=loci_threshold)
     pairwise_synteny.generate_synteny_structure('./')
     pairwise_synteny.synteny_structure_2_link(work_dir+'/%s.%s.link.txt'%(pairwise_synteny.q_genome.protID,pairwise_synteny.s_genome.protID), bundle_links = bundle_links, link_gap = link_gap)
-    circos_obj = Circos(pairwise_synteny)
-    circos_obj.generate_config(ticks = work_dir+'./txticks.conf', ideogram = work_dir+'/txideogram.conf', links_and_rules = work_dir+'/linksAndrules.conf', config=work_dir+'/circos.conf', variable_thickness=variable_thickness, thickness_factor=thickness_factor, switch_lines=switch_lines)
-    circos_obj.run_circos(work_dir)
+    if not no_output_circos:
+        circos_obj = Circos(pairwise_synteny)
+        circos_obj.generate_config(ticks = work_dir+'./txticks.conf', ideogram = work_dir+'/txideogram.conf', links_and_rules = work_dir+'/linksAndrules.conf', config=work_dir+'/circos.conf', variable_thickness=variable_thickness, thickness_factor=thickness_factor, switch_lines=switch_lines)
+        circos_obj.run_circos(work_dir)
 
 @joshuatree.command()
 @click.option('-fi', '--fasta_path', default = './fasta_path/', show_default=True, help='Fasta path containing all of the input genomes. Genome naming must conform to xxx_[protID]_xxx.[fa/fasta].', type=click.Path(exists=False))
